@@ -62,7 +62,9 @@ class MapDataRepositoryImpl @Inject constructor(
                     entity.jsonData
                 }
                 val mapData = gson.fromJson(jsonData, DayMapData::class.java)
-                entity.dayName to mapData
+                // IDを決定的に設定（eventIdとdayNameから生成）
+                val mapDataWithId = mapData.copy(id = "${eventId}_${entity.dayName}")
+                entity.dayName to mapDataWithId
             }
         }
     }
@@ -79,7 +81,9 @@ class MapDataRepositoryImpl @Inject constructor(
                 entity.jsonData
             }
             val mapData = gson.fromJson(jsonData, DayMapData::class.java)
-            entity.dayName to mapData
+            // IDを決定的に設定（eventIdとdayNameから生成）
+            val mapDataWithId = mapData.copy(id = "${eventId}_${entity.dayName}")
+            entity.dayName to mapDataWithId
         }
     }
 

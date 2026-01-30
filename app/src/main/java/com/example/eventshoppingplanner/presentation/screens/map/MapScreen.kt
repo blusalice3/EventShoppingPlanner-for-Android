@@ -262,7 +262,6 @@ fun MapScreen(
                                 halls = uiState.halls,
                                 selectedHallId = uiState.selectedHallId,
                                 hallMarkers = uiState.hallMarkers,
-                                draggingMarkerId = uiState.draggingMarkerId,
                                 isHallVertexSelectionMode = uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING,
                                 onPan = { dx, dy -> viewModel.pan(dx, dy) },
                                 onPinchZoom = { newScale, newOffsetX, newOffsetY ->
@@ -313,71 +312,66 @@ fun MapScreen(
                                 onSelectedCellTap = { row, col ->
                                     // 選択済みセルをタップしたら選択解除
                                     viewModel.removeSelectedCell(row, col)
-                                },
-                                onMarkerDragStart = { markerId ->
-                                    viewModel.setDraggingMarker(markerId)
-                                },
-                                onMarkerDrag = { markerId, row, col ->
-                                    viewModel.updateHallMarkerPosition(markerId, row, col)
-                                },
-                                onMarkerDragEnd = {
-                                    viewModel.setDraggingMarker(null)
                                 }
                             )
-                        }
 
-                        // セル選択モード中のオーバーレイ
-                        if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
-                            val (title, requiredCount) = when (uiState.currentSelectionType) {
-                                CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> "4つの角をタップ" to 4
-                                CellSelectionType.RANGE_START -> "開始点と終了点をタップ" to 2
-                                CellSelectionType.INDIVIDUAL -> "セルをタップして選択" to -1
-                                null -> "セルを選択" to 4
-                            }
-                            // 確定ボタンの表示条件
-                            val canConfirm = when (uiState.currentSelectionType) {
-                                CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> uiState.selectedCells.size >= 4
-                                CellSelectionType.RANGE_START -> uiState.selectedCells.size >= 2
-                                CellSelectionType.INDIVIDUAL -> uiState.selectedCells.isNotEmpty()
-                                null -> uiState.selectedCells.size >= 4
-                            }
-                            CellSelectionOverlay(
-                                selectedCount = uiState.selectedCells.size,
-                                requiredCount = requiredCount,
-                                title = title,
-                                showConfirmButton = canConfirm,
-                                onConfirm = { viewModel.confirmSelection() },
-                                onCancel = { viewModel.cancelCellSelection() }
-                            )
-                        }
-
-                        // ホールマーカー選択モード中のオーバーレイ
-                        if (uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING) {
-                            HallMarkerSelectionOverlay(
-                                markers = uiState.hallMarkers,
-                                mapData = mapData,
-                                scale = uiState.scale,
-                                offsetX = uiState.offsetX,
-                                offsetY = uiState.offsetY,
-                                onAddMarker = { row, col ->
-                                    viewModel.addHallMarker(row, col)
-                                },
-                                onRemoveMarker = { markerId ->
-                                    viewModel.removeHallMarker(markerId)
-                                },
-                                onMarkerDrag = { markerId, row, col ->
-                                    viewModel.updateHallMarkerPosition(markerId, row, col)
-                                },
-                                onConfirm = {
-                                    viewModel.confirmHallVertexSelection()
-                                    viewModel.showHallDefinitionPanel()
-                                },
-                                onCancel = {
-                                    viewModel.cancelHallVertexSelection()
-                                    viewModel.showHallDefinitionPanel()
+                            // セル選択モード中のオーバーレイ
+                            if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
+                                val (title, requiredCount) = when (uiState.currentSelectionType) {
+                                    CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> "4つの角をタップ" to 4
+                                    CellSelectionType.RANGE_START -> "開始点と終了点をタップ" to 2
+                                    CellSelectionType.INDIVIDUAL -> "セルをタップして選択" to -1
+                                    null -> "セルを選択" to 4
                                 }
-                            )
-                        }
+                                // 確定ボタンの表示条件
+                                val canConfirm = when (uiState.currentSelectionType) {
+                                    CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> uiState.selectedCells.size >= 4
+                                    CellSelectionType.RANGE_START -> uiState.selectedCells.size >= 2
+                                    CellSelectionType.INDIVIDUAL -> uiState.selectedCells.isNotEmpty()
+                                    null -> uiState.selectedCells.size >= 4
+                                }
+                                CellSelectionOverlay(
+                                    selectedCount = uiState.selectedCells.size,
+                                    requiredCount = requiredCount,
+                                    title = title,
+                                    showConfirmButton = canConfirm,
+                                    onConfirm = { viewModel.confirmSelection() },
+                                    onCancel = { viewModel.cancelCellSelection() }
+                                )
+                            }
+
+                            // ホールマーカー選択モード中のオーバーレイ
+                            if (uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING) {
+                                HallMarkerSelectionOverlay(
+                                    markers = uiState.hallMarkers,
+                                    isPlacingMarker = uiState.isPlacingMarker,
+                                    mapData = mapData,
+                                    scale = uiState.scale,
+                                    offsetX = uiState.offsetX,
+                                    offsetY = uiState.offsetY,
+                                    onStartPlacing = {
+                                        viewModel.startPlacingMarker()
+                                    },
+                                    onConfirmPlacement = { row, col ->
+                                        viewModel.confirmMarkerPlacement(row, col)
+                                    },
+                                    onCancelPlacing = {
+                                        viewModel.cancelPlacingMarker()
+                                    },
+                                    onRemoveMarker = { markerId ->
+                                        viewModel.removeHallMarker(markerId)
+                                    },
+                                    onConfirm = {
+                                        viewModel.confirmHallVertexSelection()
+                                        viewModel.showHallDefinitionPanel()
+                                    },
+                                    onCancel = {
+                                        viewModel.cancelHallVertexSelection()
+                                        viewModel.showHallDefinitionPanel()
+                                    }
+                                )
+                            }
+                        } // end of let { mapData -> }
                     }
                 }
             }
@@ -435,16 +429,11 @@ private fun MapCanvas(
     selectedHallId: String? = null,
     // マーカーシステム
     hallMarkers: List<HallMarker> = emptyList(),
-    draggingMarkerId: String? = null,
     isHallVertexSelectionMode: Boolean = false,
     onPan: (Float, Float) -> Unit,
     onPinchZoom: (Float, Float, Float) -> Unit,  // newScale, newOffsetX, newOffsetY
     onCellTap: (Int, Int, List<ShoppingItem>) -> Unit = { _, _, _ -> },
-    onSelectedCellTap: (Int, Int) -> Unit = { _, _ -> },
-    // マーカー操作
-    onMarkerDragStart: (String) -> Unit = {},
-    onMarkerDrag: (String, Int, Int) -> Unit = { _, _, _ -> },
-    onMarkerDragEnd: () -> Unit = {}
+    onSelectedCellTap: (Int, Int) -> Unit = { _, _ -> }
 ) {
     val density = LocalDensity.current
 
@@ -462,7 +451,7 @@ private fun MapCanvas(
         selectedCells.map { "${it.first}-${it.second}" }.toSet()
     }
 
-    // マーカー位置のセット（ドラッグ中のハイライト用）
+    // マーカー位置のセット（描画用）
     val markerCellsSet = remember(hallMarkers) {
         hallMarkers.map { "${it.row}-${it.col}" }.toSet()
     }
@@ -560,8 +549,8 @@ private fun MapCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                // ピンチズームとパン処理
-                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, isHallVertexSelectionMode) {
+                // ピンチズームとパン処理（マーカーモード中も有効）
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion) {
                     detectTransformGestures(
                         panZoomLock = false
                     ) { centroid, pan, zoom, _ ->
@@ -581,8 +570,8 @@ private fun MapCanvas(
 
                             // ViewModelに即時反映
                             onPinchZoom(localScale, localOffsetX, localOffsetY)
-                        } else if (!isHallVertexSelectionMode && (pan.x != 0f || pan.y != 0f)) {
-                            // パン処理（マーカーモード中以外）
+                        } else if (pan.x != 0f || pan.y != 0f) {
+                            // パン処理（常に有効）
                             localOffsetX += pan.x
                             localOffsetY += pan.y
                             onPan(pan.x, pan.y)
@@ -1121,31 +1110,24 @@ private fun getBorderStrokeWidth(weight: BorderWeight, scale: Float): Float {
 }
 
 /**
- * ホールマーカー選択オーバーレイ
+ * ホールマーカー選択オーバーレイ（Google Maps風配置方式）
  */
 @Composable
 private fun HallMarkerSelectionOverlay(
     markers: List<HallMarker>,
+    isPlacingMarker: Boolean,
     mapData: DayMapData,
     scale: Float,
     offsetX: Float,
     offsetY: Float,
-    onAddMarker: (Int, Int) -> Unit,
+    onStartPlacing: () -> Unit,
+    onConfirmPlacement: (Int, Int) -> Unit,
+    onCancelPlacing: () -> Unit,
     onRemoveMarker: (String) -> Unit,
-    onMarkerDrag: (String, Int, Int) -> Unit,
     onConfirm: () -> Unit,
     onCancel: () -> Unit
 ) {
     val density = LocalDensity.current
-    val markerOffsetDp = 80.dp  // マーカーの表示オフセット（タッチ位置より上）
-    val markerOffsetPx = with(density) { markerOffsetDp.toPx() }
-
-    // 各マーカーのドラッグ状態
-    var draggingMarkerId by remember { mutableStateOf<String?>(null) }
-    var dragOffset by remember { mutableStateOf(Offset.Zero) }
-
-    // 現在ドラッグ中のセル（ハイライト用）
-    var highlightedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
 
     // セル位置を計算する関数
     fun getCellPosition(row: Int, col: Int): Offset {
@@ -1189,85 +1171,55 @@ private fun HallMarkerSelectionOverlay(
         return if (foundRow > 0 && foundCol > 0) Pair(foundRow, foundCol) else null
     }
 
-    // 画面中央のセルを取得
-    fun getCenterCell(canvasWidth: Float, canvasHeight: Float): Pair<Int, Int> {
-        val centerX = canvasWidth / 2
-        val centerY = canvasHeight / 2
-        return findCellAt(centerX, centerY) ?: Pair(
-            mapData.maxRow / 2,
-            mapData.maxCol / 2
-        )
+    // セルのサイズを取得
+    fun getCellSize(row: Int, col: Int): Pair<Float, Float> {
+        val cellWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+        val cellHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+        return Pair(cellWidth, cellHeight)
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // ドラッグ中のセルハイライト用Canvas
-        if (highlightedCell != null) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                highlightedCell?.let { (row, col) ->
-                    val cellPos = getCellPosition(row, col)
-                    val cellWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
-                    val cellHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val screenWidth = constraints.maxWidth.toFloat()
+        val screenHeight = constraints.maxHeight.toFloat()
+        val screenCenterX = screenWidth / 2
+        val screenCenterY = screenHeight / 2
 
-                    drawRect(
-                        color = Color(0xFF2196F3).copy(alpha = 0.3f),
-                        topLeft = Offset(cellPos.x - cellWidth / 2, cellPos.y - cellHeight / 2),
-                        size = Size(cellWidth, cellHeight)
-                    )
-                    drawRect(
-                        color = Color(0xFF2196F3),
-                        topLeft = Offset(cellPos.x - cellWidth / 2, cellPos.y - cellHeight / 2),
-                        size = Size(cellWidth, cellHeight),
-                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
-                    )
-                }
+        // 画面中央のセルを計算
+        val centerCell = findCellAt(screenCenterX, screenCenterY)
+
+        // 配置中の場合、画面中央のセルをハイライト表示
+        if (isPlacingMarker && centerCell != null) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val (row, col) = centerCell
+                val cellPos = getCellPosition(row, col)
+                val (cellWidth, cellHeight) = getCellSize(row, col)
+
+                // セルのハイライト
+                drawRect(
+                    color = Color(0xFF4CAF50).copy(alpha = 0.3f),
+                    topLeft = Offset(cellPos.x - cellWidth / 2, cellPos.y - cellHeight / 2),
+                    size = Size(cellWidth, cellHeight)
+                )
+                drawRect(
+                    color = Color(0xFF4CAF50),
+                    topLeft = Offset(cellPos.x - cellWidth / 2, cellPos.y - cellHeight / 2),
+                    size = Size(cellWidth, cellHeight),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                )
             }
         }
 
-        // マーカー表示
+        // 設置済みマーカーの表示
         markers.forEach { marker ->
             val cellPos = getCellPosition(marker.row, marker.col)
-            val isDragging = draggingMarkerId == marker.id
 
-            // マーカーの表示位置（ドラッグ中はドラッグオフセットを適用）
-            val displayX = if (isDragging) dragOffset.x else cellPos.x
-            val displayY = if (isDragging) dragOffset.y - markerOffsetPx else cellPos.y - markerOffsetPx
-
+            // マーカーの表示（セルの中央に根元が来る）
             Box(
                 modifier = Modifier
                     .offset {
                         IntOffset(
-                            (displayX - 24.dp.toPx()).toInt(),
-                            (displayY - 48.dp.toPx()).toInt()
-                        )
-                    }
-                    .pointerInput(marker.id) {
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                draggingMarkerId = marker.id
-                                dragOffset = Offset(
-                                    cellPos.x + offset.x - size.width / 2,
-                                    cellPos.y + offset.y - size.height / 2 + markerOffsetPx
-                                )
-                            },
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                dragOffset += dragAmount
-                                // ドラッグ位置のセルを計算（マーカーオフセットを考慮）
-                                val cellAt = findCellAt(dragOffset.x, dragOffset.y)
-                                highlightedCell = cellAt
-                            },
-                            onDragEnd = {
-                                // ドラッグ終了時にセルにスナップ
-                                highlightedCell?.let { (row, col) ->
-                                    onMarkerDrag(marker.id, row, col)
-                                }
-                                draggingMarkerId = null
-                                highlightedCell = null
-                            },
-                            onDragCancel = {
-                                draggingMarkerId = null
-                                highlightedCell = null
-                            }
+                            (cellPos.x - with(density) { 20.dp.toPx() }).toInt(),
+                            (cellPos.y - with(density) { 48.dp.toPx() }).toInt()
                         )
                     }
             ) {
@@ -1289,10 +1241,43 @@ private fun HallMarkerSelectionOverlay(
                     // マーカーアイコン
                     Text(
                         text = "🚩",
-                        fontSize = 32.sp,
+                        fontSize = 28.sp,
                         modifier = Modifier.offset(y = (-8).dp)
                     )
                 }
+            }
+        }
+
+        // 配置中の🚩（画面中央に固定、根元が中央に来る）
+        if (isPlacingMarker) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .offset(y = (-24).dp)  // 🚩の根元が中央に来るように調整
+            ) {
+                Text(
+                    text = "🚩",
+                    fontSize = 48.sp
+                )
+            }
+
+            // 中央の照準マーク
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                // 十字線
+                val crossSize = 20f
+                val strokeWidth = 2f
+                drawLine(
+                    color = Color(0xFF4CAF50),
+                    start = Offset(screenCenterX - crossSize, screenCenterY),
+                    end = Offset(screenCenterX + crossSize, screenCenterY),
+                    strokeWidth = strokeWidth
+                )
+                drawLine(
+                    color = Color(0xFF4CAF50),
+                    start = Offset(screenCenterX, screenCenterY - crossSize),
+                    end = Offset(screenCenterX, screenCenterY + crossSize),
+                    strokeWidth = strokeWidth
+                )
             }
         }
 
@@ -1316,10 +1301,23 @@ private fun HallMarkerSelectionOverlay(
                 Spacer(modifier = Modifier.height(4.dp))
 
                 Text(
-                    text = "🚩をドラッグして頂点を配置してください",
+                    text = if (isPlacingMarker) {
+                        "マップを動かして🚩を配置 → 「設置」で確定"
+                    } else {
+                        "「+」で新しい頂点を追加"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                // 配置中のセル座標を表示
+                if (isPlacingMarker && centerCell != null) {
+                    Text(
+                        text = "位置: 行${centerCell.first}, 列${centerCell.second}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF4CAF50)
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(12.dp))
 
@@ -1327,33 +1325,43 @@ private fun HallMarkerSelectionOverlay(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // マーカー追加ボタン
-                    OutlinedButton(
-                        onClick = {
-                            // 画面サイズを取得して中央のセルを計算
-                            // 実際の画面サイズが取得できないので、マップの中央付近を使用
-                            val centerRow = mapData.maxRow / 2
-                            val centerCol = mapData.maxCol / 2
-                            onAddMarker(centerRow, centerCol)
-                        },
-                        enabled = markers.size < 6
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("マーカー追加")
-                    }
+                    if (isPlacingMarker) {
+                        // 配置中: 設置ボタンとキャンセルボタン
+                        Button(
+                            onClick = {
+                                centerCell?.let { (row, col) ->
+                                    onConfirmPlacement(row, col)
+                                }
+                            },
+                            enabled = centerCell != null
+                        ) {
+                            Text("設置")
+                        }
 
-                    // 確定ボタン
-                    Button(
-                        onClick = onConfirm,
-                        enabled = markers.size >= 4
-                    ) {
-                        Text("確定")
-                    }
+                        OutlinedButton(onClick = onCancelPlacing) {
+                            Text("戻る")
+                        }
+                    } else {
+                        // 通常: +ボタン、確定、キャンセル
+                        OutlinedButton(
+                            onClick = onStartPlacing,
+                            enabled = markers.size < 6
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null)
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("追加")
+                        }
 
-                    // キャンセルボタン
-                    OutlinedButton(onClick = onCancel) {
-                        Text("キャンセル")
+                        Button(
+                            onClick = onConfirm,
+                            enabled = markers.size >= 4
+                        ) {
+                            Text("確定 (${markers.size})")
+                        }
+
+                        OutlinedButton(onClick = onCancel) {
+                            Text("キャンセル")
+                        }
                     }
                 }
             }
@@ -1371,7 +1379,7 @@ private fun NoMapPlaceholder(
         verticalArrangement = Arrangement.Center
     ) {
         Icon(
-            imageVector = Icons.Default.ZoomIn,
+            imageVector = Icons.Default.GridOn,
             contentDescription = null,
             modifier = Modifier.size(64.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant

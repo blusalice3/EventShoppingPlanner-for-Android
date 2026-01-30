@@ -625,6 +625,7 @@ object XlsxMapParser {
         val blocks = detectBlocksFromCells(cells, updatedMergedCells, maxRow, maxCol)
 
         return DayMapData(
+            id = "${eventId}_${sheetName}",  // 決定的なIDを生成
             eventId = eventId,
             dayName = sheetName,
             sheetName = sheetName,

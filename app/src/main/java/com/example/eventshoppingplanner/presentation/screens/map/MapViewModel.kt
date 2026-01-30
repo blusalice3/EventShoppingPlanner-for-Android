@@ -55,8 +55,8 @@ data class MapUiState(
     val isHallDefinitionPanelVisible: Boolean = false,
     // マーカーによる頂点選択モード
     val hallVertexSelectionMode: HallVertexSelectionMode = HallVertexSelectionMode.NONE,
-    val hallMarkers: List<HallMarker> = emptyList(),  // マーカーリスト
-    val draggingMarkerId: String? = null,  // ドラッグ中のマーカーID
+    val hallMarkers: List<HallMarker> = emptyList(),  // 設置済みマーカーリスト
+    val isPlacingMarker: Boolean = false,  // 新規マーカー配置中か
     val selectedHallVertices: List<Vertex> = emptyList(),  // 確定済み頂点（後方互換用）
     val editingHallId: String? = null,  // 編集中のホールID（新規はnull）
     val pendingHallEditState: HallEditState? = null  // 頂点選択中に保持する編集状態
@@ -272,6 +272,8 @@ class MapViewModel @Inject constructor(
 
     fun selectMap(mapName: String) {
         val mapData = _uiState.value.mapDataList[mapName]
+        Log.d("MapViewModel", "selectMap: mapName=$mapName, mapDataId=${mapData?.id}, eventId=${mapData?.eventId}")
+
         _uiState.update {
             it.copy(
                 selectedMapName = mapName,
@@ -319,20 +321,41 @@ class MapViewModel @Inject constructor(
         _uiState.update { it.copy(offsetX = x, offsetY = y) }
     }
 
-    // ===== マーカー関連 =====
+    // ===== マーカー関連（Google Maps風配置方式） =====
 
     /**
-     * マーカーを追加（画面中央に対応するセルに配置）
+     * マーカー配置モードを開始
+     * 画面中央に🚩を表示し、パン/ズームで位置調整可能に
      */
-    fun addHallMarker(centerRow: Int, centerCol: Int) {
+    fun startPlacingMarker() {
         val markers = _uiState.value.hallMarkers
         if (markers.size >= 6) return  // 最大6個まで
 
-        val newMarker = HallMarker(
-            row = centerRow,
-            col = centerCol
-        )
-        _uiState.update { it.copy(hallMarkers = markers + newMarker) }
+        _uiState.update { it.copy(isPlacingMarker = true) }
+    }
+
+    /**
+     * マーカー配置を確定
+     * 現在の画面中央のセルにマーカーを設置
+     */
+    fun confirmMarkerPlacement(row: Int, col: Int) {
+        val markers = _uiState.value.hallMarkers
+        if (markers.size >= 6) return
+
+        val newMarker = HallMarker(row = row, col = col)
+        _uiState.update {
+            it.copy(
+                hallMarkers = markers + newMarker,
+                isPlacingMarker = false
+            )
+        }
+    }
+
+    /**
+     * マーカー配置をキャンセル
+     */
+    fun cancelPlacingMarker() {
+        _uiState.update { it.copy(isPlacingMarker = false) }
     }
 
     /**
@@ -341,23 +364,6 @@ class MapViewModel @Inject constructor(
     fun removeHallMarker(markerId: String) {
         val markers = _uiState.value.hallMarkers.filter { it.id != markerId }
         _uiState.update { it.copy(hallMarkers = markers) }
-    }
-
-    /**
-     * マーカーの位置を更新
-     */
-    fun updateHallMarkerPosition(markerId: String, row: Int, col: Int) {
-        val markers = _uiState.value.hallMarkers.map { marker ->
-            if (marker.id == markerId) marker.copy(row = row, col = col) else marker
-        }
-        _uiState.update { it.copy(hallMarkers = markers) }
-    }
-
-    /**
-     * ドラッグ中のマーカーIDを設定
-     */
-    fun setDraggingMarker(markerId: String?) {
-        _uiState.update { it.copy(draggingMarkerId = markerId) }
     }
 
     /**
@@ -608,19 +614,18 @@ class MapViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                hallDefinitionDao.getHallsByMapDataId(mapDataId).collect { entities ->
-                    val halls = entities.map { entity ->
-                        val verticesType = object : TypeToken<List<Vertex>>() {}.type
-                        val vertices: List<Vertex> = gson.fromJson(entity.verticesJson, verticesType)
-                        HallDefinition(
-                            id = entity.id,
-                            name = entity.name,
-                            vertices = vertices,
-                            color = entity.color
-                        )
-                    }
-                    _uiState.update { it.copy(halls = halls) }
+                val entities = hallDefinitionDao.getHallsByMapDataIdOnce(mapDataId)
+                val halls = entities.map { entity ->
+                    val verticesType = object : TypeToken<List<Vertex>>() {}.type
+                    val vertices: List<Vertex> = gson.fromJson(entity.verticesJson, verticesType)
+                    HallDefinition(
+                        id = entity.id,
+                        name = entity.name,
+                        vertices = vertices,
+                        color = entity.color
+                    )
                 }
+                _uiState.update { it.copy(halls = halls) }
             } catch (e: Exception) {
                 Log.e("MapViewModel", "Failed to load halls", e)
             }
@@ -631,6 +636,9 @@ class MapViewModel @Inject constructor(
      * ホール定義パネルを開く
      */
     fun openHallDefinitionPanel() {
+        // パネルを開くときにDBから最新のホール定義を読み込む
+        loadHallsForCurrentMap()
+
         _uiState.update {
             it.copy(
                 isHallDefinitionPanelOpen = true,
@@ -685,7 +693,7 @@ class MapViewModel @Inject constructor(
             it.copy(
                 hallVertexSelectionMode = HallVertexSelectionMode.SELECTING,
                 hallMarkers = initialMarkers,
-                draggingMarkerId = null,
+                isPlacingMarker = false,
                 selectedHallVertices = emptyList(),
                 editingHallId = editingHallId,
                 isHallDefinitionPanelVisible = false,
@@ -738,7 +746,7 @@ class MapViewModel @Inject constructor(
             it.copy(
                 hallVertexSelectionMode = HallVertexSelectionMode.NONE,
                 hallMarkers = emptyList(),
-                draggingMarkerId = null,
+                isPlacingMarker = false,
                 // ソート済み頂点を保持（HallDefinitionPanelで使用）
                 selectedHallVertices = sortedVertices,
                 isHallDefinitionPanelVisible = true
@@ -756,7 +764,7 @@ class MapViewModel @Inject constructor(
             it.copy(
                 hallVertexSelectionMode = HallVertexSelectionMode.NONE,
                 hallMarkers = emptyList(),
-                draggingMarkerId = null,
+                isPlacingMarker = false,
                 selectedHallVertices = emptyList(),
                 editingHallId = null,
                 isHallDefinitionPanelVisible = true
@@ -772,10 +780,8 @@ class MapViewModel @Inject constructor(
 
         viewModelScope.launch {
             try {
-                // 既存のホールを削除
                 hallDefinitionDao.deleteHallsByMapDataId(mapDataId)
 
-                // 新しいホールを保存
                 val entities = halls.map { hall ->
                     HallDefinitionEntity(
                         id = hall.id,
@@ -785,8 +791,8 @@ class MapViewModel @Inject constructor(
                         color = hall.color
                     )
                 }
-                hallDefinitionDao.insertHalls(entities)
 
+                hallDefinitionDao.insertHalls(entities)
                 _uiState.update { it.copy(halls = halls) }
             } catch (e: Exception) {
                 Log.e("MapViewModel", "Failed to save halls", e)

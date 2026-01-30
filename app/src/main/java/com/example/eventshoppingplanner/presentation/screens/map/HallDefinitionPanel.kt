@@ -50,7 +50,12 @@ fun HallDefinitionPanel(
     onConsumePendingEditState: () -> HallEditState?
 ) {
     // ローカルで編集中のホールリスト
-    var localHalls by remember(halls) { mutableStateOf(halls) }
+    var localHalls by remember { mutableStateOf(halls) }
+
+    // hallsが外部から変更されたときにlocalHallsを更新
+    LaunchedEffect(halls) {
+        localHalls = halls
+    }
 
     // 編集中のホール
     var editingHall by remember { mutableStateOf<HallDefinition?>(null) }
