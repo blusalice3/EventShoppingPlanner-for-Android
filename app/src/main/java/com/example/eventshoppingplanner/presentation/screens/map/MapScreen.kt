@@ -11,9 +11,13 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.OpenInNew
@@ -32,6 +36,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -39,6 +44,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.eventshoppingplanner.domain.model.*
 import com.example.eventshoppingplanner.domain.model.PurchaseStatus
+
+/**
+ * 新規アイテム追加時のプリセット情報
+ */
+private data class NewItemPreset(
+    val eventDate: String,
+    val block: String,
+    val number: String
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,6 +66,10 @@ fun MapScreen(
 
     // セルタップ時のダイアログ状態
     var selectedCellInfo by remember { mutableStateOf<CellTapInfo?>(null) }
+
+    // 新規アイテム追加ダイアログの状態
+    var showAddItemDialog by remember { mutableStateOf(false) }
+    var newItemPreset by remember { mutableStateOf<NewItemPreset?>(null) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -72,6 +90,36 @@ fun MapScreen(
             onOpenUrl = { url ->
                 val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))
                 context.startActivity(intent)
+            },
+            onAddNewItem = if (cellInfo.isInBlockDefinition) {
+                {
+                    // マップ名から参加日を抽出（例: "1日目マップ" -> "1日目"）
+                    val eventDate = uiState.selectedMapName?.replace("マップ", "") ?: ""
+                    newItemPreset = NewItemPreset(
+                        eventDate = eventDate,
+                        block = cellInfo.blockName,
+                        number = cellInfo.number.toString()
+                    )
+                    selectedCellInfo = null
+                    showAddItemDialog = true
+                }
+            } else null
+        )
+    }
+
+    // 新規アイテム追加ダイアログ
+    if (showAddItemDialog && newItemPreset != null) {
+        AddItemFromMapDialog(
+            preset = newItemPreset!!,
+            eventId = eventId,
+            onDismiss = {
+                showAddItemDialog = false
+                newItemPreset = null
+            },
+            onSave = { item ->
+                viewModel.addItem(item)
+                showAddItemDialog = false
+                newItemPreset = null
             }
         )
     }
@@ -178,15 +226,42 @@ fun MapScreen(
                                     // セル選択モード中は選択に使用
                                     if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
                                         viewModel.addSelectedCell(row, col)
-                                    } else if (items.isNotEmpty()) {
-                                        val firstItem = items.first()
-                                        selectedCellInfo = CellTapInfo(
-                                            row = row,
-                                            col = col,
-                                            blockName = firstItem.block,
-                                            number = firstItem.number,
-                                            items = items
+                                    } else {
+                                        // ブロック定義内かチェックし、ブロック情報を取得
+                                        val blockInfo = findBlockInfoForCell(
+                                            row, col,
+                                            mapData.blocks,
+                                            mapData.cells,
+                                            mapData.mergedCells
                                         )
+
+                                        when {
+                                            blockInfo != null -> {
+                                                // ブロック定義内のセル
+                                                selectedCellInfo = CellTapInfo(
+                                                    row = row,
+                                                    col = col,
+                                                    blockName = blockInfo.first,
+                                                    number = blockInfo.second,
+                                                    items = items,
+                                                    isInBlockDefinition = true
+                                                )
+                                            }
+                                            items.isNotEmpty() -> {
+                                                // ブロック定義外だがアイテムがある場合
+                                                val firstItem = items.first()
+                                                val numValue = extractNumberFromItemNumber(firstItem.number) ?: 0
+                                                selectedCellInfo = CellTapInfo(
+                                                    row = row,
+                                                    col = col,
+                                                    blockName = firstItem.block,
+                                                    number = numValue,
+                                                    items = items,
+                                                    isInBlockDefinition = false
+                                                )
+                                            }
+                                            // ブロック定義外かつアイテムなし → 何もしない
+                                        }
                                     }
                                 },
                                 onSelectedCellTap = { row, col ->
@@ -290,6 +365,15 @@ private fun MapCanvas(
     val density = LocalDensity.current
     val scale = zoomLevel.scale
 
+    // ジェスチャー完了を示すバージョン（パン/ズーム終了時にインクリメント）
+    // これをpointerInputのkeyに使用し、操作完了後に座標系を更新
+    var gestureVersion by remember { mutableStateOf(0) }
+
+    // ズームレベル変更時にgestureVersionを更新
+    LaunchedEffect(zoomLevel) {
+        gestureVersion++
+    }
+
     // 選択済みセルのセット
     val selectedCellsSet = remember(selectedCells) {
         selectedCells.map { "${it.first}-${it.second}" }.toSet()
@@ -373,30 +457,70 @@ private fun MapCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(selectedCellsSet, isSelectionMode) {
-                    detectTapGestures { offset ->
-                        val cellPos = findCellAtPosition(offset.x, offset.y)
-                        cellPos?.let { (row, col) ->
-                            // 結合セルの場合は開始セルを使用
-                            val mergedInfo = mergeMap["$row-$col"]
-                            val actualRow = mergedInfo?.startRow ?: row
-                            val actualCol = mergedInfo?.startCol ?: col
-                            val key = "$actualRow-$actualCol"
+                // gestureVersionをkeyに追加：パン/ズーム完了後にpointerInputが再生成される
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion) {
+                    awaitPointerEventScope {
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull() ?: continue
 
-                            // セル選択モード中で、既に選択済みのセルをタップした場合は選択解除
-                            if (isSelectionMode && selectedCellsSet.contains(key)) {
-                                onSelectedCellTap(actualRow, actualCol)
-                            } else {
-                                val items = cellItemsMap[key] ?: emptyList()
-                                onCellTap(actualRow, actualCol, items)
+                            if (change.pressed) {
+                                val startPosition = change.position
+                                val startTime = System.currentTimeMillis()
+                                var totalDrag = Offset.Zero
+                                var wasDragging = false
+
+                                // ポインタが離されるまで追跡
+                                while (change.pressed) {
+                                    val nextEvent = awaitPointerEvent()
+                                    val nextChange = nextEvent.changes.firstOrNull() ?: break
+
+                                    if (nextChange.pressed) {
+                                        val dragAmount = nextChange.position - nextChange.previousPosition
+                                        totalDrag += dragAmount
+
+                                        // ドラッグ閾値を超えたらパン処理
+                                        if (totalDrag.getDistance() > 10f) {
+                                            wasDragging = true
+                                            onPan(dragAmount.x, dragAmount.y)
+                                            nextChange.consume()
+                                        }
+                                    } else {
+                                        // ポインタが離された
+                                        val endTime = System.currentTimeMillis()
+                                        val duration = endTime - startTime
+
+                                        // 短いタップで移動量が少ない場合はタップとして処理
+                                        if (duration < 300 && totalDrag.getDistance() < 20f) {
+                                            val cellPos = findCellAtPosition(startPosition.x, startPosition.y)
+                                            cellPos?.let { (row, col) ->
+                                                // 結合セルの場合は開始セルを使用
+                                                val mergedInfo = mergeMap["$row-$col"]
+                                                val actualRow = mergedInfo?.startRow ?: row
+                                                val actualCol = mergedInfo?.startCol ?: col
+                                                val key = "$actualRow-$actualCol"
+
+                                                // セル選択モード中で、既に選択済みのセルをタップした場合は選択解除
+                                                if (isSelectionMode && selectedCellsSet.contains(key)) {
+                                                    onSelectedCellTap(actualRow, actualCol)
+                                                } else {
+                                                    val items = cellItemsMap[key] ?: emptyList()
+                                                    onCellTap(actualRow, actualCol, items)
+                                                }
+                                            }
+                                        }
+                                        nextChange.consume()
+                                        break
+                                    }
+                                }
+
+                                // パン操作が終了した場合、gestureVersionをインクリメント
+                                // これにより次のタップで最新の座標系が使われる
+                                if (wasDragging) {
+                                    gestureVersion++
+                                }
                             }
                         }
-                    }
-                }
-                .pointerInput(Unit) {
-                    detectDragGestures { change, dragAmount ->
-                        change.consume()
-                        onPan(dragAmount.x, dragAmount.y)
                     }
                 }
         ) {
@@ -969,8 +1093,9 @@ private data class CellTapInfo(
     val row: Int,
     val col: Int,
     val blockName: String,
-    val number: String,
-    val items: List<ShoppingItem>
+    val number: Int,
+    val items: List<ShoppingItem>,
+    val isInBlockDefinition: Boolean = false
 )
 
 /**
@@ -979,11 +1104,12 @@ private data class CellTapInfo(
 @Composable
 private fun CellItemsDialog(
     blockName: String,
-    number: String,
+    number: Int,
     items: List<ShoppingItem>,
     onDismiss: () -> Unit,
     onUpdateStatus: (String, PurchaseStatus) -> Unit,
-    onOpenUrl: (String) -> Unit
+    onOpenUrl: (String) -> Unit,
+    onAddNewItem: (() -> Unit)? = null
 ) {
     Dialog(onDismissRequest = onDismiss) {
         Card(
@@ -996,47 +1122,83 @@ private fun CellItemsDialog(
                 modifier = Modifier.padding(16.dp)
             ) {
                 // ヘッダー
-                Text(
-                    text = "$blockName - $number",
-                    style = MaterialTheme.typography.titleLarge
-                )
-
-                Text(
-                    text = "${items.size}件のアイテム",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // アイテム一覧
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 400.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    items(items) { item ->
-                        CellItemRow(
-                            item = item,
-                            onStatusChange = { status ->
-                                onUpdateStatus(item.id, status)
-                            },
-                            onOpenUrl = {
-                                item.url?.let { onOpenUrl(it) }
-                            }
+                    Column {
+                        Text(
+                            text = "$blockName - $number",
+                            style = MaterialTheme.typography.titleLarge
+                        )
+                        if (items.isNotEmpty()) {
+                            Text(
+                                text = "${items.size}件のアイテム",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "閉じる",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
+                Spacer(modifier = Modifier.height(12.dp))
 
-                // 閉じるボタン
-                TextButton(
-                    onClick = onDismiss,
-                    modifier = Modifier.align(Alignment.End)
-                ) {
-                    Text("閉じる")
+                // 新規アイテム追加ボタン
+                onAddNewItem?.let { addNewItem ->
+                    Button(
+                        onClick = addNewItem,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            Icons.Default.Add,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("新規アイテム追加")
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+
+                // アイテム一覧
+                if (items.isNotEmpty()) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 350.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(items) { item ->
+                            CellItemRow(
+                                item = item,
+                                onStatusChange = { status ->
+                                    onUpdateStatus(item.id, status)
+                                },
+                                onOpenUrl = {
+                                    item.url?.let { onOpenUrl(it) }
+                                }
+                            )
+                        }
+                    }
+                } else if (onAddNewItem == null) {
+                    // アイテムなし＆新規追加なしの場合のみメッセージ表示
+                    Text(
+                        text = "このセルにはアイテムがありません",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 16.dp)
+                    )
                 }
             }
         }
@@ -1157,4 +1319,300 @@ private fun CellItemRow(
             }
         }
     }
+}
+
+// ===== ヘルパー関数 =====
+
+/**
+ * セルがブロックの範囲内にあるかチェック（cellGroups対応）
+ */
+private fun isCellInBlock(row: Int, col: Int, block: BlockDefinition): Boolean {
+    // cellGroupsがある場合（複数範囲ブロックや壁ブロック）
+    if (block.cellGroups.isNotEmpty()) {
+        return block.cellGroups.any { group ->
+            when (group.type) {
+                CellGroupType.RANGE -> {
+                    row >= (group.startRow ?: 0) && row <= (group.endRow ?: 0) &&
+                            col >= (group.startCol ?: 0) && col <= (group.endCol ?: 0)
+                }
+                CellGroupType.INDIVIDUAL -> {
+                    group.cells.any { it.first == row && it.second == col }
+                }
+            }
+        }
+    }
+    // 通常の矩形ブロック
+    return row >= block.startRow && row <= block.endRow &&
+            col >= block.startCol && col <= block.endCol
+}
+
+/**
+ * タップされたセルのブロック情報を特定
+ * numberCellsに登録されている数値セルのみを対象とする
+ * 注: タップ処理で既に結合セルは開始座標に変換済み
+ * @return Pair(blockName, number) or null
+ */
+private fun findBlockInfoForCell(
+    row: Int,
+    col: Int,
+    blocks: List<BlockDefinition>,
+    cells: List<CellData>,
+    mergedCells: List<MergedCellInfo>
+): Pair<String, Int>? {
+    // 各ブロックのnumberCellsから該当セルを探す
+    for (block in blocks) {
+        val numberCell = block.numberCells.find {
+            it.row == row && it.col == col
+        }
+        if (numberCell != null) {
+            return Pair(block.name, numberCell.value)
+        }
+    }
+    return null
+}
+
+/**
+ * アイテムナンバーから数値部分を抽出
+ * "5a" → 5, "12" → 12, "abc" → null
+ */
+private fun extractNumberFromItemNumber(itemNumber: String): Int? {
+    val match = Regex("^(\\d+)").find(itemNumber)
+    return match?.groupValues?.get(1)?.toIntOrNull()
+}
+
+/**
+ * マップからの新規アイテム追加ダイアログ
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AddItemFromMapDialog(
+    preset: NewItemPreset,
+    eventId: String,
+    onDismiss: () -> Unit,
+    onSave: (ShoppingItem) -> Unit
+) {
+    // 入力状態（プリセット値で初期化）
+    var circle by remember { mutableStateOf("") }
+    var eventDate by remember { mutableStateOf(preset.eventDate) }
+    var block by remember { mutableStateOf(preset.block) }
+    var number by remember { mutableStateOf(preset.number) }
+    var title by remember { mutableStateOf("") }
+    var price by remember { mutableStateOf("") }
+    var quantity by remember { mutableStateOf(1) }
+    var remarks by remember { mutableStateOf("") }
+    var url by remember { mutableStateOf("") }
+
+    // ドロップダウン展開状態
+    var priceExpanded by remember { mutableStateOf(false) }
+    var quantityExpanded by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text("新規アイテム追加")
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // サークル名
+                OutlinedTextField(
+                    value = circle,
+                    onValueChange = { circle = it },
+                    label = { Text("サークル名 *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // タイトル
+                OutlinedTextField(
+                    value = title,
+                    onValueChange = { title = it },
+                    label = { Text("タイトル") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // 参加日（プリセット値を表示、編集可能）
+                OutlinedTextField(
+                    value = eventDate,
+                    onValueChange = { eventDate = it },
+                    label = { Text("参加日 *") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // ブロック・ナンバー（プリセット値を表示、編集可能）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = block,
+                        onValueChange = { block = it },
+                        label = { Text("ブロック *") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                    OutlinedTextField(
+                        value = number,
+                        onValueChange = { number = it },
+                        label = { Text("ナンバー *") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                // 価格（テキスト入力 + クイック選択）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = if (price.isEmpty()) "価格未定" else price,
+                        onValueChange = {
+                            val filtered = it.filter { c -> c.isDigit() }
+                            price = filtered
+                        },
+                        label = { Text("価格") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                        suffix = { if (price.isNotEmpty()) Text("円") },
+                        textStyle = if (price.isEmpty()) {
+                            MaterialTheme.typography.bodyLarge.copy(
+                                color = MaterialTheme.colorScheme.error
+                            )
+                        } else {
+                            MaterialTheme.typography.bodyLarge
+                        }
+                    )
+
+                    // クイック選択ボタン
+                    ExposedDropdownMenuBox(
+                        expanded = priceExpanded,
+                        onExpandedChange = { priceExpanded = it }
+                    ) {
+                        TextButton(
+                            onClick = { priceExpanded = true },
+                            modifier = Modifier.menuAnchor()
+                        ) {
+                            Text("選択")
+                        }
+                        ExposedDropdownMenu(
+                            expanded = priceExpanded,
+                            onDismissRequest = { priceExpanded = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        "価格未定",
+                                        color = MaterialTheme.colorScheme.error
+                                    )
+                                },
+                                onClick = {
+                                    price = ""
+                                    priceExpanded = false
+                                }
+                            )
+                            listOf(0, 100, 200, 300, 500, 1000, 1500, 2000, 3000, 5000).forEach { p ->
+                                DropdownMenuItem(
+                                    text = { Text("${p}円") },
+                                    onClick = {
+                                        price = p.toString()
+                                        priceExpanded = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 数量
+                ExposedDropdownMenuBox(
+                    expanded = quantityExpanded,
+                    onExpandedChange = { quantityExpanded = it }
+                ) {
+                    OutlinedTextField(
+                        value = quantity.toString(),
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("数量") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = quantityExpanded) },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .menuAnchor()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = quantityExpanded,
+                        onDismissRequest = { quantityExpanded = false }
+                    ) {
+                        (1..10).forEach { q ->
+                            DropdownMenuItem(
+                                text = { Text(q.toString()) },
+                                onClick = {
+                                    quantity = q
+                                    quantityExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
+
+                // 備考
+                OutlinedTextField(
+                    value = remarks,
+                    onValueChange = { remarks = it },
+                    label = { Text("備考") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // URL
+                OutlinedTextField(
+                    value = url,
+                    onValueChange = { url = it },
+                    label = { Text("URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    placeholder = { Text("https://...") }
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val newItem = ShoppingItem(
+                        id = java.util.UUID.randomUUID().toString(),
+                        eventId = eventId,
+                        circle = circle,
+                        eventDate = eventDate,
+                        block = block,
+                        number = number,
+                        title = title,
+                        price = price.toIntOrNull(),
+                        purchaseStatus = PurchaseStatus.NONE,
+                        quantity = quantity,
+                        remarks = remarks,
+                        url = url.ifBlank { null },
+                        sortOrder = 0,
+                        isInExecuteList = false
+                    )
+                    onSave(newItem)
+                },
+                enabled = circle.isNotBlank() && eventDate.isNotBlank() && block.isNotBlank() && number.isNotBlank()
+            ) {
+                Text("保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("キャンセル")
+            }
+        }
+    )
 }

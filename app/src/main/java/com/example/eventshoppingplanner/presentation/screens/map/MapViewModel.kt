@@ -310,6 +310,15 @@ class MapViewModel @Inject constructor(
         }
     }
 
+    fun addItem(item: ShoppingItem) {
+        viewModelScope.launch {
+            // eventIdを設定してアイテムを追加
+            val eventId = _uiState.value.event?.id ?: return@launch
+            val itemWithEventId = item.copy(eventId = eventId)
+            itemRepository.insertItem(itemWithEventId)
+        }
+    }
+
     // ===== ブロック定義パネル関連 =====
 
     fun openBlockDefinitionPanel() {
