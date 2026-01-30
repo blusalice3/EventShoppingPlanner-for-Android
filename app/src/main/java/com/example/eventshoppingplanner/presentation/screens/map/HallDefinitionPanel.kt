@@ -50,12 +50,11 @@ fun HallDefinitionPanel(
     onConsumePendingEditState: () -> HallEditState?
 ) {
     // ローカルで編集中のホールリスト
-    var localHalls by remember { mutableStateOf(halls) }
+    // keyにhallsを使用することで、外部からの変更時のみ再初期化
+    var localHalls by remember(halls) { mutableStateOf(halls) }
 
-    // hallsが外部から変更されたときにlocalHallsを更新
-    LaunchedEffect(halls) {
-        localHalls = halls
-    }
+    // デバッグログ
+    android.util.Log.d("HallDefinitionPanel", "Rendered: halls.size=${halls.size}, localHalls.size=${localHalls.size}")
 
     // 編集中のホール
     var editingHall by remember { mutableStateOf<HallDefinition?>(null) }

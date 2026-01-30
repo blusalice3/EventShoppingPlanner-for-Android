@@ -13,15 +13,18 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.*
@@ -37,6 +40,7 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -46,6 +50,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.eventshoppingplanner.domain.model.*
 import com.example.eventshoppingplanner.domain.model.PurchaseStatus
+import com.example.eventshoppingplanner.util.HallUtils
 
 /**
  * 新規アイテム追加時のプリセット情報
@@ -72,6 +77,13 @@ fun MapScreen(
     // 新規アイテム追加ダイアログの状態
     var showAddItemDialog by remember { mutableStateOf(false) }
     var newItemPreset by remember { mutableStateOf<NewItemPreset?>(null) }
+
+    // ホールアイテム数を更新（ホール定義がある場合のみ）
+    LaunchedEffect(uiState.halls.size, uiState.items.size, uiState.currentMapData?.id) {
+        if (uiState.halls.isNotEmpty() && uiState.currentMapData != null) {
+            viewModel.updateHallItemCounts()
+        }
+    }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -174,6 +186,122 @@ fun MapScreen(
                     }
                 },
                 actions = {
+                    // ホール選択アイコン（ホール定義がある場合のみ表示）
+                    if (uiState.currentMapData != null && uiState.halls.isNotEmpty()) {
+                        Box {
+                            IconButton(
+                                onClick = { viewModel.toggleHallSelector() }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Map,
+                                    contentDescription = "ホール選択",
+                                    tint = if (uiState.selectedHallId != null) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        LocalContentColor.current
+                                    }
+                                )
+                            }
+                            // 選択中インジケーター
+                            if (uiState.selectedHallId != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .offset(x = (-4).dp, y = 4.dp)
+                                        .size(8.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.primary,
+                                            CircleShape
+                                        )
+                                )
+                            }
+
+                            // ドロップダウンメニュー
+                            DropdownMenu(
+                                expanded = uiState.isHallSelectorOpen,
+                                onDismissRequest = { viewModel.closeHallSelector() }
+                            ) {
+                                // 全ホール
+                                DropdownMenuItem(
+                                    text = {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.SpaceBetween,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Text(
+                                                "全ホール",
+                                                fontWeight = if (uiState.selectedHallId == null) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        }
+                                    },
+                                    onClick = { viewModel.selectHall(null) },
+                                    leadingIcon = {
+                                        if (uiState.selectedHallId == null) {
+                                            Icon(
+                                                Icons.Default.Check,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                    }
+                                )
+
+                                HorizontalDivider()
+
+                                // 各ホール
+                                uiState.halls.forEach { hall ->
+                                    val itemCount = uiState.hallItemCounts[hall.id]
+                                    val executeCount = itemCount?.executeCount ?: 0
+                                    val totalCount = itemCount?.totalCount ?: 0
+
+                                    DropdownMenuItem(
+                                        text = {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    // ホール色インジケーター
+                                                    Box(
+                                                        modifier = Modifier
+                                                            .size(12.dp)
+                                                            .background(
+                                                                Color(hall.color),
+                                                                CircleShape
+                                                            )
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        hall.name,
+                                                        fontWeight = if (uiState.selectedHallId == hall.id) FontWeight.Bold else FontWeight.Normal
+                                                    )
+                                                }
+                                                Text(
+                                                    "(${executeCount}/${totalCount}件)",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        },
+                                        onClick = { viewModel.selectHall(hall.id) },
+                                        leadingIcon = {
+                                            if (uiState.selectedHallId == hall.id) {
+                                                Icon(
+                                                    Icons.Default.Check,
+                                                    contentDescription = null,
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
                     // ブロック定義ボタン（マップがある場合のみ表示）
                     if (uiState.currentMapData != null) {
                         IconButton(
@@ -228,18 +356,6 @@ fun MapScreen(
                             mapNames = uiState.mapDataList.keys.toList(),
                             selectedMapName = uiState.selectedMapName,
                             onSelectMap = { viewModel.selectMap(it) }
-                        )
-                    }
-
-                    // ホール選択ドロップダウン（ホールが定義されている場合のみ表示）
-                    if (uiState.halls.isNotEmpty()) {
-                        HallSelector(
-                            halls = uiState.halls,
-                            selectedHallId = uiState.selectedHallId,
-                            onSelectHall = { viewModel.selectHall(it) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
                         )
                     }
 
@@ -499,6 +615,58 @@ private fun MapCanvas(
     val colorSelected = Color(0xFF2196F3)  // 選択セルの色
     val colorSelectionArea = Color(0xFF2196F3).copy(alpha = 0.15f)  // 選択範囲の塗りつぶし色
 
+    // 選択されたホールの範囲を計算
+    val selectedHall = remember(selectedHallId, halls) {
+        if (selectedHallId != null) {
+            halls.find { it.id == selectedHallId }
+        } else null
+    }
+
+    // ホール内のセルかどうかを判定する関数
+    val isInSelectedHall: (Int, Int) -> Boolean = remember(selectedHall) {
+        if (selectedHall == null || selectedHall.vertices.size < 3) {
+            { _, _ -> true }  // 全ホール表示時は常にtrue
+        } else {
+            { row, col -> HallUtils.isPointInPolygon(row, col, selectedHall.vertices) }
+        }
+    }
+
+    // ホールの範囲（ピクセル座標）を計算 - スケールなしの基準座標
+    val hallBoundsBase = remember(selectedHall, mapData) {
+        if (selectedHall == null) null
+        else {
+            val bounds = HallUtils.getHallBounds(selectedHall)
+            if (bounds != null && bounds.minCol >= 1 && bounds.minRow >= 1) {
+                // 行/列からピクセル座標を計算（スケールなし）
+                var minX = 0f
+                for (c in 1 until bounds.minCol) {
+                    minX += mapData.columnWidths[c] ?: mapData.defaultColumnWidth
+                }
+                var maxX = minX
+                for (c in bounds.minCol..minOf(bounds.maxCol, mapData.maxCol)) {
+                    maxX += mapData.columnWidths[c] ?: mapData.defaultColumnWidth
+                }
+
+                var minY = 0f
+                for (r in 1 until bounds.minRow) {
+                    minY += mapData.rowHeights[r] ?: mapData.defaultRowHeight
+                }
+                var maxY = minY
+                for (r in bounds.minRow..minOf(bounds.maxRow, mapData.maxRow)) {
+                    maxY += mapData.rowHeights[r] ?: mapData.defaultRowHeight
+                }
+
+                // 有効な範囲かチェック
+                if (maxX > minX && maxY > minY) {
+                    HallBoundsPixels(minX, maxX, minY, maxY)
+                } else null
+            } else null
+        }
+    }
+
+    // 後方互換性のため（描画用）
+    val hallBoundsPixels = hallBoundsBase
+
     // 現在のスケールとオフセットをローカルで保持（ピンチ操作中の計算用）
     var localScale by remember { mutableStateOf(scale) }
     var localOffsetX by remember { mutableStateOf(offsetX) }
@@ -550,7 +718,7 @@ private fun MapCanvas(
             modifier = Modifier
                 .fillMaxSize()
                 // ピンチズームとパン処理（マーカーモード中も有効）
-                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion) {
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, hallBoundsPixels) {
                     detectTransformGestures(
                         panZoomLock = false
                     ) { centroid, pan, zoom, _ ->
@@ -561,8 +729,44 @@ private fun MapCanvas(
                             // ピンチの中心点を基準にズーム
                             // 中心点がスケール前後で同じ位置に留まるようにオフセットを調整
                             val scaleChange = newScale / localScale
-                            val newOffsetX = centroid.x - (centroid.x - localOffsetX) * scaleChange
-                            val newOffsetY = centroid.y - (centroid.y - localOffsetY) * scaleChange
+                            var newOffsetX = centroid.x - (centroid.x - localOffsetX) * scaleChange
+                            var newOffsetY = centroid.y - (centroid.y - localOffsetY) * scaleChange
+
+                            // ホール選択時のズーム後オフセット制限
+                            if (hallBoundsPixels != null) {
+                                val hallWidth = (hallBoundsPixels.maxX - hallBoundsPixels.minX) * newScale
+                                val hallHeight = (hallBoundsPixels.maxY - hallBoundsPixels.minY) * newScale
+                                val hallStartX = -hallBoundsPixels.minX * newScale
+                                val hallStartY = -hallBoundsPixels.minY * newScale
+
+                                // ホールが画面内に収まるように制限
+                                // ホールの上端/左端が画面の下20%/右20%より上/左にある
+                                val maxOffsetX = hallStartX + size.width * 0.2f
+                                val maxOffsetY = hallStartY + size.height * 0.2f
+                                // ホールの下端/右端が画面の上20%/左20%より下/右にある
+                                val minOffsetX = hallStartX - hallWidth + size.width * 0.8f
+                                val minOffsetY = hallStartY - hallHeight + size.height * 0.8f
+
+                                // ホールが画面より大きい場合（min > max）でも制限をかける
+                                if (minOffsetX <= maxOffsetX) {
+                                    newOffsetX = newOffsetX.coerceIn(minOffsetX, maxOffsetX)
+                                } else {
+                                    // ホールが画面より大きい場合：中央に寄せる方向に制限
+                                    val centerOffset = (minOffsetX + maxOffsetX) / 2
+                                    // ホールの端が画面に少なくとも20%残るように制限
+                                    val limitedMin = hallStartX - hallWidth + size.width * 0.2f
+                                    val limitedMax = hallStartX + size.width * 0.8f
+                                    newOffsetX = newOffsetX.coerceIn(limitedMin, limitedMax)
+                                }
+                                if (minOffsetY <= maxOffsetY) {
+                                    newOffsetY = newOffsetY.coerceIn(minOffsetY, maxOffsetY)
+                                } else {
+                                    // ホールが画面より大きい場合：端が画面に残るように制限
+                                    val limitedMin = hallStartY - hallHeight + size.height * 0.2f
+                                    val limitedMax = hallStartY + size.height * 0.8f
+                                    newOffsetY = newOffsetY.coerceIn(limitedMin, limitedMax)
+                                }
+                            }
 
                             localScale = newScale
                             localOffsetX = newOffsetX
@@ -571,10 +775,50 @@ private fun MapCanvas(
                             // ViewModelに即時反映
                             onPinchZoom(localScale, localOffsetX, localOffsetY)
                         } else if (pan.x != 0f || pan.y != 0f) {
-                            // パン処理（常に有効）
-                            localOffsetX += pan.x
-                            localOffsetY += pan.y
-                            onPan(pan.x, pan.y)
+                            // パン処理
+                            var newOffsetX = localOffsetX + pan.x
+                            var newOffsetY = localOffsetY + pan.y
+
+                            // ホール選択時のパン制限
+                            if (hallBoundsPixels != null) {
+                                val hallWidth = (hallBoundsPixels.maxX - hallBoundsPixels.minX) * localScale
+                                val hallHeight = (hallBoundsPixels.maxY - hallBoundsPixels.minY) * localScale
+                                val hallStartX = -hallBoundsPixels.minX * localScale
+                                val hallStartY = -hallBoundsPixels.minY * localScale
+
+                                // ホールが画面内に収まるように制限
+                                // ホールの上端/左端が画面の下20%/右20%より上/左にある
+                                val maxOffsetX = hallStartX + size.width * 0.2f
+                                val maxOffsetY = hallStartY + size.height * 0.2f
+                                // ホールの下端/右端が画面の上20%/左20%より下/右にある
+                                val minOffsetX = hallStartX - hallWidth + size.width * 0.8f
+                                val minOffsetY = hallStartY - hallHeight + size.height * 0.8f
+
+                                // ホールが画面より大きい場合（min > max）でも制限をかける
+                                if (minOffsetX <= maxOffsetX) {
+                                    newOffsetX = newOffsetX.coerceIn(minOffsetX, maxOffsetX)
+                                } else {
+                                    // ホールが画面より大きい場合：端が画面に少なくとも20%残るように制限
+                                    val limitedMin = hallStartX - hallWidth + size.width * 0.2f
+                                    val limitedMax = hallStartX + size.width * 0.8f
+                                    newOffsetX = newOffsetX.coerceIn(limitedMin, limitedMax)
+                                }
+                                if (minOffsetY <= maxOffsetY) {
+                                    newOffsetY = newOffsetY.coerceIn(minOffsetY, maxOffsetY)
+                                } else {
+                                    // ホールが画面より大きい場合：端が画面に残るように制限
+                                    val limitedMin = hallStartY - hallHeight + size.height * 0.2f
+                                    val limitedMax = hallStartY + size.height * 0.8f
+                                    newOffsetY = newOffsetY.coerceIn(limitedMin, limitedMax)
+                                }
+                            }
+
+                            val actualPanX = newOffsetX - localOffsetX
+                            val actualPanY = newOffsetY - localOffsetY
+
+                            localOffsetX = newOffsetX
+                            localOffsetY = newOffsetY
+                            onPan(actualPanX, actualPanY)
                         }
                     }
                 }
@@ -665,12 +909,18 @@ private fun MapCanvas(
                     val x = getColumnX(col)
                     if (x > canvasWidth + 100) break
 
+                    // ホール選択時はホール外のセルをスキップ
+                    if (!isInSelectedHall(row, col)) continue
+
                     val cellKey = "$row-$col"
                     val mergedInfo = mergeMap[cellKey]
 
                     // 結合セルの場合
                     if (mergedInfo != null) {
                         val mergeKey = "${mergedInfo.startRow}-${mergedInfo.startCol}"
+
+                        // ホール選択時は結合セルの開始セルがホール内かチェック
+                        if (!isInSelectedHall(mergedInfo.startRow, mergedInfo.startCol)) continue
 
                         // 結合セルの開始セルの場合のみ描画
                         if (row == mergedInfo.startRow && col == mergedInfo.startCol &&
@@ -1038,6 +1288,16 @@ private data class SelectionBounds(
     val minCol: Int,
     val maxRow: Int,
     val maxCol: Int
+)
+
+/**
+ * ホールの境界（ピクセル座標）
+ */
+private data class HallBoundsPixels(
+    val minX: Float,
+    val maxX: Float,
+    val minY: Float,
+    val maxY: Float
 )
 
 /**
@@ -1993,85 +2253,4 @@ private fun AddItemFromMapDialog(
             }
         }
     )
-}
-
-/**
- * ホール選択ドロップダウン
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun HallSelector(
-    halls: List<HallDefinition>,
-    selectedHallId: String?,
-    onSelectHall: (String?) -> Unit,
-    modifier: Modifier = Modifier
-) {
-    var expanded by remember { mutableStateOf(false) }
-
-    val selectedHall = halls.find { it.id == selectedHallId }
-    val displayText = selectedHall?.name ?: "全ホール"
-
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it },
-        modifier = modifier
-    ) {
-        OutlinedTextField(
-            value = displayText,
-            onValueChange = {},
-            readOnly = true,
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .fillMaxWidth()
-                .menuAnchor(),
-            colors = OutlinedTextFieldDefaults.colors(),
-            leadingIcon = if (selectedHall != null) {
-                {
-                    Box(
-                        modifier = Modifier
-                            .size(16.dp)
-                            .background(Color(selectedHall.color), shape = androidx.compose.foundation.shape.CircleShape)
-                    )
-                }
-            } else null
-        )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false }
-        ) {
-            // 全ホールオプション
-            DropdownMenuItem(
-                text = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("● ", color = MaterialTheme.colorScheme.onSurface)
-                        Text("全ホール")
-                    }
-                },
-                onClick = {
-                    onSelectHall(null)
-                    expanded = false
-                }
-            )
-            // 各ホール
-            halls.forEach { hall ->
-                DropdownMenuItem(
-                    text = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Box(
-                                modifier = Modifier
-                                    .size(12.dp)
-                                    .background(Color(hall.color), shape = androidx.compose.foundation.shape.CircleShape)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(hall.name)
-                        }
-                    },
-                    onClick = {
-                        onSelectHall(hall.id)
-                        expanded = false
-                    }
-                )
-            }
-        }
-    }
 }

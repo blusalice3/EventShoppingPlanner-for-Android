@@ -29,6 +29,19 @@ object HallUtils {
     )
 
     /**
+     * ホールの範囲（bounding box）
+     */
+    data class HallBounds(
+        val minRow: Int,
+        val maxRow: Int,
+        val minCol: Int,
+        val maxCol: Int
+    ) {
+        val width: Int get() = maxCol - minCol + 1
+        val height: Int get() = maxRow - minRow + 1
+    }
+
+    /**
      * 頂点リストから多角形を形成（重心からの角度でソート）
      * 凸包ではなく、選択した全ての頂点を含む多角形を形成
      * @param points 頂点リスト
@@ -145,6 +158,22 @@ object HallUtils {
             val centerCol = (block.startCol + block.endCol) / 2f
             isPointInPolygon(centerRow, centerCol, hall.vertices)
         }
+    }
+
+    /**
+     * ホールの範囲（bounding box）を計算
+     * @param hall ホール定義
+     * @return ホールの範囲
+     */
+    fun getHallBounds(hall: HallDefinition): HallBounds? {
+        if (hall.vertices.size < 3) return null
+
+        val minRow = hall.vertices.minOf { it.row }
+        val maxRow = hall.vertices.maxOf { it.row }
+        val minCol = hall.vertices.minOf { it.col }
+        val maxCol = hall.vertices.maxOf { it.col }
+
+        return HallBounds(minRow, maxRow, minCol, maxCol)
     }
 
     /**

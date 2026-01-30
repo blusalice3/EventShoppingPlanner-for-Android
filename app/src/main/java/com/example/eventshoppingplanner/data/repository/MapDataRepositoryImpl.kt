@@ -62,8 +62,12 @@ class MapDataRepositoryImpl @Inject constructor(
                     entity.jsonData
                 }
                 val mapData = gson.fromJson(jsonData, DayMapData::class.java)
-                // IDを決定的に設定（eventIdとdayNameから生成）
-                val mapDataWithId = mapData.copy(id = "${eventId}_${entity.dayName}")
+                // mapData.idがない（古いデータ）場合はentity.idを使用
+                val mapDataWithId = if (mapData.id.isNotEmpty() && !mapData.id.startsWith("00000000")) {
+                    mapData
+                } else {
+                    mapData.copy(id = entity.id)
+                }
                 entity.dayName to mapDataWithId
             }
         }
@@ -74,15 +78,19 @@ class MapDataRepositoryImpl @Inject constructor(
         val entities = mapDataDao.getMapDataByEventIdOnce(eventId)
         Log.d("MapDataRepo", "getMapDataByEventIdOnce: found ${entities.size} entities")
         return entities.associate { entity ->
-            Log.d("MapDataRepo", "  - dayName=${entity.dayName}, id=${entity.id}, dataSize=${entity.jsonData.length}")
             val jsonData = if (isCompressed(entity.jsonData)) {
                 decompress(entity.jsonData)
             } else {
                 entity.jsonData
             }
             val mapData = gson.fromJson(jsonData, DayMapData::class.java)
-            // IDを決定的に設定（eventIdとdayNameから生成）
-            val mapDataWithId = mapData.copy(id = "${eventId}_${entity.dayName}")
+            // mapData.idがない（古いデータ）場合はentity.idを使用
+            val mapDataWithId = if (mapData.id.isNotEmpty() && !mapData.id.startsWith("00000000")) {
+                mapData
+            } else {
+                mapData.copy(id = entity.id)
+            }
+            Log.d("MapDataRepo", "  - dayName=${entity.dayName}, entity.id=${entity.id}, mapData.id=${mapDataWithId.id}")
             entity.dayName to mapDataWithId
         }
     }
@@ -92,9 +100,10 @@ class MapDataRepositoryImpl @Inject constructor(
         val entities = mapDataList.map { (dayName, mapData) ->
             val json = gson.toJson(mapData)
             val compressed = compress(json)
-            Log.d("MapDataRepo", "  - dayName=$dayName, original=${json.length}, compressed=${compressed.length}")
+            // mapData.idを使用して、XlsxMapParserで設定されたIDと一致させる
+            Log.d("MapDataRepo", "  - dayName=$dayName, mapData.id=${mapData.id}, original=${json.length}, compressed=${compressed.length}")
             MapDataEntity(
-                id = "${eventId}_${dayName}",
+                id = mapData.id,  // mapData.idをそのまま使用
                 eventId = eventId,
                 dayName = dayName,
                 sheetName = mapData.sheetName,
@@ -110,7 +119,7 @@ class MapDataRepositoryImpl @Inject constructor(
         val json = gson.toJson(mapData)
         val compressed = compress(json)
         val entity = MapDataEntity(
-            id = "${mapData.eventId}_${mapData.dayName}",
+            id = mapData.id,  // mapData.idをそのまま使用
             eventId = mapData.eventId,
             dayName = mapData.dayName,
             sheetName = mapData.sheetName,

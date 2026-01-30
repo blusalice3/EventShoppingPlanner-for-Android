@@ -51,6 +51,8 @@ data class MapUiState(
     // ホール定義関連
     val halls: List<HallDefinition> = emptyList(),
     val selectedHallId: String? = null,  // null = "all"（全ホール表示）
+    val isHallSelectorOpen: Boolean = false,  // ホール選択ドロップダウンの表示状態
+    val hallItemCounts: Map<String, HallItemCount> = emptyMap(),  // ホールごとのアイテム数
     val isHallDefinitionPanelOpen: Boolean = false,
     val isHallDefinitionPanelVisible: Boolean = false,
     // マーカーによる頂点選択モード
@@ -60,6 +62,14 @@ data class MapUiState(
     val selectedHallVertices: List<Vertex> = emptyList(),  // 確定済み頂点（後方互換用）
     val editingHallId: String? = null,  // 編集中のホールID（新規はnull）
     val pendingHallEditState: HallEditState? = null  // 頂点選択中に保持する編集状態
+)
+
+/**
+ * ホールごとのアイテム数
+ */
+data class HallItemCount(
+    val executeCount: Int,  // 訪問先リストに追加されたアイテム数（現時点では常に0）
+    val totalCount: Int     // ホール内の全アイテム数
 )
 
 /**
@@ -272,7 +282,10 @@ class MapViewModel @Inject constructor(
 
     fun selectMap(mapName: String) {
         val mapData = _uiState.value.mapDataList[mapName]
-        Log.d("MapViewModel", "selectMap: mapName=$mapName, mapDataId=${mapData?.id}, eventId=${mapData?.eventId}")
+        Log.d("MapViewModel", "selectMap: mapName=$mapName")
+        Log.d("MapViewModel", "selectMap: mapData?.id=${mapData?.id}")
+        Log.d("MapViewModel", "selectMap: mapData?.eventId=${mapData?.eventId}")
+        Log.d("MapViewModel", "selectMap: mapData?.dayName=${mapData?.dayName}")
 
         _uiState.update {
             it.copy(
@@ -610,11 +623,18 @@ class MapViewModel @Inject constructor(
      * 現在のマップのホール定義をDBから読み込む
      */
     fun loadHallsForCurrentMap() {
-        val mapDataId = _uiState.value.currentMapData?.id ?: return
+        val mapDataId = _uiState.value.currentMapData?.id
+        Log.d("MapViewModel", "loadHallsForCurrentMap: mapDataId=$mapDataId")
+
+        if (mapDataId == null) {
+            Log.w("MapViewModel", "loadHallsForCurrentMap: mapDataId is null, currentMapData=${_uiState.value.currentMapData}")
+            return
+        }
 
         viewModelScope.launch {
             try {
                 val entities = hallDefinitionDao.getHallsByMapDataIdOnce(mapDataId)
+                Log.d("MapViewModel", "loadHallsForCurrentMap: found ${entities.size} halls for mapDataId=$mapDataId")
                 val halls = entities.map { entity ->
                     val verticesType = object : TypeToken<List<Vertex>>() {}.type
                     val vertices: List<Vertex> = gson.fromJson(entity.verticesJson, verticesType)
@@ -626,6 +646,7 @@ class MapViewModel @Inject constructor(
                     )
                 }
                 _uiState.update { it.copy(halls = halls) }
+                Log.d("MapViewModel", "loadHallsForCurrentMap: updated state with ${halls.size} halls")
             } catch (e: Exception) {
                 Log.e("MapViewModel", "Failed to load halls", e)
             }
@@ -636,8 +657,11 @@ class MapViewModel @Inject constructor(
      * ホール定義パネルを開く
      */
     fun openHallDefinitionPanel() {
-        // パネルを開くときにDBから最新のホール定義を読み込む
-        loadHallsForCurrentMap()
+        // 注意: loadHallsForCurrentMapは呼ばない
+        // 理由: saveHalls()で保存後、uiState.hallsは既に更新されている
+        // loadHallsForCurrentMapを呼ぶと非同期でDBから読み込み、
+        // mapDataIdの不一致でhallsが空になる可能性がある
+        Log.d("MapViewModel", "openHallDefinitionPanel: current halls=${_uiState.value.halls.size}")
 
         _uiState.update {
             it.copy(
@@ -673,10 +697,137 @@ class MapViewModel @Inject constructor(
     }
 
     /**
+     * ホール選択ドロップダウンの開閉
+     */
+    fun toggleHallSelector() {
+        _uiState.update { it.copy(isHallSelectorOpen = !it.isHallSelectorOpen) }
+    }
+
+    /**
+     * ホール選択ドロップダウンを閉じる
+     */
+    fun closeHallSelector() {
+        _uiState.update { it.copy(isHallSelectorOpen = false) }
+    }
+
+    /**
      * ホール選択（表示切替）
      */
     fun selectHall(hallId: String?) {
-        _uiState.update { it.copy(selectedHallId = hallId) }
+        // nullの場合は全ホール表示
+        if (hallId == null) {
+            _uiState.update {
+                it.copy(
+                    selectedHallId = null,
+                    isHallSelectorOpen = false
+                )
+            }
+            return
+        }
+
+        // 指定されたホールが存在するか確認
+        val hall = _uiState.value.halls.find { it.id == hallId }
+        if (hall == null) {
+            // 存在しないホールIDの場合は全ホール表示に戻す
+            _uiState.update {
+                it.copy(
+                    selectedHallId = null,
+                    isHallSelectorOpen = false
+                )
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                selectedHallId = hallId,
+                isHallSelectorOpen = false
+            )
+        }
+
+        // ホール選択時にビューをリセット（ホール内が見える位置に移動）
+        centerOnHall(hallId)
+    }
+
+    /**
+     * 指定ホールを中央に表示
+     */
+    private fun centerOnHall(hallId: String) {
+        val hall = _uiState.value.halls.find { it.id == hallId } ?: return
+        val bounds = HallUtils.getHallBounds(hall) ?: return
+        val mapData = _uiState.value.currentMapData ?: return
+
+        // 境界チェック
+        if (bounds.minRow < 1 || bounds.minCol < 1) return
+        if (bounds.maxRow > mapData.maxRow || bounds.maxCol > mapData.maxCol) return
+
+        // ホール中心のセル座標を計算
+        val centerRow = (bounds.minRow + bounds.maxRow) / 2
+        val centerCol = (bounds.minCol + bounds.maxCol) / 2
+
+        // セル中心のピクセル座標を計算
+        var cellX = 0f
+        for (c in 1 until centerCol) {
+            cellX += mapData.columnWidths[c] ?: mapData.defaultColumnWidth
+        }
+        cellX += (mapData.columnWidths[centerCol] ?: mapData.defaultColumnWidth) / 2
+
+        var cellY = 0f
+        for (r in 1 until centerRow) {
+            cellY += mapData.rowHeights[r] ?: mapData.defaultRowHeight
+        }
+        cellY += (mapData.rowHeights[centerRow] ?: mapData.defaultRowHeight) / 2
+
+        // スケールを調整（ホール全体が見えるように）
+        // 現在のスケールを維持しつつ、オフセットを調整
+        val currentScale = _uiState.value.scale
+
+        // 仮の画面サイズ（実際の値は取得できないので概算）
+        val screenWidth = 1080f
+        val screenHeight = 1920f
+
+        val newOffsetX = screenWidth / 2 - cellX * currentScale
+        val newOffsetY = screenHeight / 2 - cellY * currentScale
+
+        _uiState.update {
+            it.copy(
+                offsetX = newOffsetX,
+                offsetY = newOffsetY
+            )
+        }
+    }
+
+    /**
+     * ホールごとのアイテム数を計算
+     */
+    fun updateHallItemCounts() {
+        val halls = _uiState.value.halls
+        val items = _uiState.value.items
+        val mapData = _uiState.value.currentMapData ?: return
+        val blocks = mapData.blocks
+
+        val counts = mutableMapOf<String, HallItemCount>()
+
+        for (hall in halls) {
+            // ホール内のブロック名を取得
+            val blocksInHall = HallUtils.getBlocksInHall(hall, blocks)
+            val blockNamesInHall = blocksInHall.map { it.name }.toSet()
+
+            // ホール内のアイテム数をカウント
+            val totalCount = items.count { item ->
+                blockNamesInHall.contains(item.block)
+            }
+
+            // 訪問先リストのカウント（未実装なので0）
+            val executeCount = 0
+
+            counts[hall.id] = HallItemCount(
+                executeCount = executeCount,
+                totalCount = totalCount
+            )
+        }
+
+        _uiState.update { it.copy(hallItemCounts = counts) }
     }
 
     /**
@@ -776,10 +927,17 @@ class MapViewModel @Inject constructor(
      * ホール定義をDBに保存
      */
     fun saveHalls(halls: List<HallDefinition>) {
-        val mapDataId = _uiState.value.currentMapData?.id ?: return
+        val mapDataId = _uiState.value.currentMapData?.id
+        Log.d("MapViewModel", "saveHalls: mapDataId=$mapDataId, hallsCount=${halls.size}")
+
+        if (mapDataId == null) {
+            Log.e("MapViewModel", "saveHalls: mapDataId is null, cannot save halls")
+            return
+        }
 
         viewModelScope.launch {
             try {
+                Log.d("MapViewModel", "saveHalls: deleting existing halls for mapDataId=$mapDataId")
                 hallDefinitionDao.deleteHallsByMapDataId(mapDataId)
 
                 val entities = halls.map { hall ->
@@ -792,8 +950,10 @@ class MapViewModel @Inject constructor(
                     )
                 }
 
+                Log.d("MapViewModel", "saveHalls: inserting ${entities.size} halls")
                 hallDefinitionDao.insertHalls(entities)
                 _uiState.update { it.copy(halls = halls) }
+                Log.d("MapViewModel", "saveHalls: completed successfully")
             } catch (e: Exception) {
                 Log.e("MapViewModel", "Failed to save halls", e)
             }
