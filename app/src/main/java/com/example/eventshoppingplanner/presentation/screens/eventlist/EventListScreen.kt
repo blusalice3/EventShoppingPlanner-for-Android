@@ -81,7 +81,7 @@ fun EventListScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = onNavigateToImport
+                onClick = { viewModel.showCreateDialog() }
             ) {
                 Icon(Icons.Default.Add, contentDescription = "新規作成")
             }
@@ -109,7 +109,7 @@ fun EventListScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(16.dp))
-                        Button(onClick = onNavigateToImport) {
+                        Button(onClick = { viewModel.showCreateDialog() }) {
                             Icon(Icons.Default.Add, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("新規作成")

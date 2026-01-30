@@ -1,5 +1,6 @@
 package com.example.eventshoppingplanner.presentation.screens.eventlist
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.eventshoppingplanner.domain.model.Event
@@ -44,24 +45,33 @@ class EventListViewModel @Inject constructor(
     }
 
     private fun loadEvents() {
+        Log.d("EventListVM", "loadEvents: START")
         viewModelScope.launch {
-            eventRepository.getAllEvents()
-                .collect { events ->
-                    val eventsWithStats = events.map { event ->
-                        EventWithStats(
-                            event = event,
-                            itemCount = itemRepository.getItemCount(event.id),
-                            purchasedCount = itemRepository.getPurchasedCount(event.id)
-                        )
+            try {
+                eventRepository.getAllEvents()
+                    .collect { events ->
+                        Log.d("EventListVM", "loadEvents: received ${events.size} events")
+                        val eventsWithStats = events.map { event ->
+                            EventWithStats(
+                                event = event,
+                                itemCount = itemRepository.getItemCount(event.id),
+                                purchasedCount = itemRepository.getPurchasedCount(event.id)
+                            )
+                        }
+                        _uiState.update {
+                            it.copy(events = eventsWithStats, isLoading = false)
+                        }
+                        Log.d("EventListVM", "loadEvents: isLoading set to false")
                     }
-                    _uiState.update {
-                        it.copy(events = eventsWithStats, isLoading = false)
-                    }
-                }
+            } catch (e: Exception) {
+                Log.e("EventListVM", "loadEvents: error", e)
+                _uiState.update { it.copy(isLoading = false) }
+            }
         }
     }
 
     fun showCreateDialog() {
+        Log.d("EventListVM", "showCreateDialog: called")
         _uiState.update { it.copy(showCreateDialog = true) }
     }
 
@@ -70,6 +80,7 @@ class EventListViewModel @Inject constructor(
     }
 
     fun createEvent(name: String) {
+        Log.d("EventListVM", "createEvent: name=$name")
         viewModelScope.launch {
             val event = Event(
                 id = UUID.randomUUID().toString(),
@@ -78,6 +89,7 @@ class EventListViewModel @Inject constructor(
                 updatedAt = Instant.now()
             )
             eventRepository.insertEvent(event)
+            Log.d("EventListVM", "createEvent: inserted event id=${event.id}")
             hideCreateDialog()
         }
     }

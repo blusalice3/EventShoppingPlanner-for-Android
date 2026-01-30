@@ -5,26 +5,36 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.eventshoppingplanner.domain.model.*
 import com.example.eventshoppingplanner.domain.model.PurchaseStatus
@@ -37,11 +47,46 @@ fun MapScreen(
     viewModel: MapViewModel = hiltViewModel()
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val context = LocalContext.current
+
+    // セルタップ時のダイアログ状態
+    var selectedCellInfo by remember { mutableStateOf<CellTapInfo?>(null) }
 
     val filePickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let { viewModel.importMapFile(it) }
+    }
+
+    // セルアイテムダイアログ
+    selectedCellInfo?.let { cellInfo ->
+        CellItemsDialog(
+            blockName = cellInfo.blockName,
+            number = cellInfo.number,
+            items = cellInfo.items,
+            onDismiss = { selectedCellInfo = null },
+            onUpdateStatus = { itemId, status ->
+                viewModel.updateItemStatus(itemId, status)
+            },
+            onOpenUrl = { url ->
+                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))
+                context.startActivity(intent)
+            }
+        )
+    }
+
+    // ブロック定義パネル
+    uiState.currentMapData?.let { mapData ->
+        BlockDefinitionPanel(
+            isOpen = uiState.isBlockDefinitionPanelOpen,
+            onClose = { viewModel.closeBlockDefinitionPanel() },
+            mapData = mapData,
+            selectedCells = uiState.selectedCells,
+            onStartCellSelection = { viewModel.startCellSelection() },
+            onCancelCellSelection = { viewModel.cancelCellSelection() },
+            onUpdateBlocks = { blocks -> viewModel.updateBlocks(blocks) },
+            isInSelectionMode = uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT
+        )
     }
 
     Scaffold(
@@ -54,6 +99,14 @@ fun MapScreen(
                     }
                 },
                 actions = {
+                    // ブロック定義ボタン（マップがある場合のみ表示）
+                    if (uiState.currentMapData != null) {
+                        IconButton(
+                            onClick = { viewModel.openBlockDefinitionPanel() }
+                        ) {
+                            Icon(Icons.Default.GridOn, "ブロック定義")
+                        }
+                    }
                     IconButton(
                         onClick = {
                             filePickerLauncher.launch(arrayOf(
@@ -98,7 +151,11 @@ fun MapScreen(
                     }
 
                     // マップキャンバス
-                    Box(modifier = Modifier.weight(1f)) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clipToBounds()
+                    ) {
                         uiState.currentMapData?.let { mapData ->
                             MapCanvas(
                                 mapData = mapData,
@@ -106,7 +163,32 @@ fun MapScreen(
                                 offsetX = uiState.offsetX,
                                 offsetY = uiState.offsetY,
                                 cellItemsMap = uiState.cellItemsMap,
-                                onPan = { dx, dy -> viewModel.pan(dx, dy) }
+                                selectedCells = uiState.selectedCells,
+                                isSelectionMode = uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT,
+                                onPan = { dx, dy -> viewModel.pan(dx, dy) },
+                                onCellTap = { row, col, items ->
+                                    // セル選択モード中は選択に使用
+                                    if (uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT) {
+                                        viewModel.addSelectedCell(row, col)
+                                    } else if (items.isNotEmpty()) {
+                                        val firstItem = items.first()
+                                        selectedCellInfo = CellTapInfo(
+                                            row = row,
+                                            col = col,
+                                            blockName = firstItem.block,
+                                            number = firstItem.number,
+                                            items = items
+                                        )
+                                    }
+                                }
+                            )
+                        }
+
+                        // セル選択モード中のオーバーレイ
+                        if (uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT) {
+                            CellSelectionOverlay(
+                                selectedCount = uiState.selectedCells.size,
+                                onCancel = { viewModel.cancelCellSelection() }
                             )
                         }
 
@@ -169,10 +251,18 @@ private fun MapCanvas(
     offsetX: Float,
     offsetY: Float,
     cellItemsMap: Map<String, List<ShoppingItem>>,
-    onPan: (Float, Float) -> Unit
+    selectedCells: List<Pair<Int, Int>> = emptyList(),
+    isSelectionMode: Boolean = false,
+    onPan: (Float, Float) -> Unit,
+    onCellTap: (Int, Int, List<ShoppingItem>) -> Unit = { _, _, _ -> }
 ) {
     val density = LocalDensity.current
     val scale = zoomLevel.scale
+
+    // 選択済みセルのセット
+    val selectedCellsSet = remember(selectedCells) {
+        selectedCells.map { "${it.first}-${it.second}" }.toSet()
+    }
 
     // セルマップを作成
     val cellMap = remember(mapData) {
@@ -197,6 +287,34 @@ private fun MapCanvas(
     val colorYellow = Color(0xFFFFF9C4)
     val colorRed = Color(0xFFFFCDD2)
     val colorWhite = Color.White
+    val colorSelected = Color(0xFF2196F3)  // 選択セルの色
+
+    // タップ位置からセル座標を計算する関数
+    fun findCellAtPosition(tapX: Float, tapY: Float): Pair<Int, Int>? {
+        var currentX = offsetX
+        var foundCol = -1
+        for (col in 1..mapData.maxCol) {
+            val colWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+            if (tapX >= currentX && tapX < currentX + colWidth) {
+                foundCol = col
+                break
+            }
+            currentX += colWidth
+        }
+
+        var currentY = offsetY
+        var foundRow = -1
+        for (row in 1..mapData.maxRow) {
+            val rowHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+            if (tapY >= currentY && tapY < currentY + rowHeight) {
+                foundRow = row
+                break
+            }
+            currentY += rowHeight
+        }
+
+        return if (foundRow > 0 && foundCol > 0) Pair(foundRow, foundCol) else null
+    }
 
     Box(
         modifier = Modifier
@@ -206,6 +324,20 @@ private fun MapCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                .pointerInput(Unit) {
+                    detectTapGestures { offset ->
+                        val cellPos = findCellAtPosition(offset.x, offset.y)
+                        cellPos?.let { (row, col) ->
+                            // 結合セルの場合は開始セルを使用
+                            val mergedInfo = mergeMap["$row-$col"]
+                            val actualRow = mergedInfo?.startRow ?: row
+                            val actualCol = mergedInfo?.startCol ?: col
+                            val key = "$actualRow-$actualCol"
+                            val items = cellItemsMap[key] ?: emptyList()
+                            onCellTap(actualRow, actualCol, items)
+                        }
+                    }
+                }
                 .pointerInput(Unit) {
                     detectDragGestures { change, dragAmount ->
                         change.consume()
@@ -329,14 +461,24 @@ private fun MapCanvas(
                             // テキストを描画
                             val textValue = mergedInfo.value ?: cell?.value
                             textValue?.let { value ->
-                                val fontSize = ((cell?.fontInfo?.size ?: 11f) * scale * 0.8f).coerceIn(4f, 48f)
+                                // Web版と同様にセルサイズベースでフォントサイズを計算
+                                val isNumeric = value.toString().matches(Regex("^\\d+$"))
+                                val baseSize = minOf(mergedWidth, mergedHeight)
+                                val fontSize = if (isNumeric) {
+                                    // 数値セル: セルサイズの40%、最大24px
+                                    minOf(baseSize * 0.4f, 24f * density.density)
+                                } else {
+                                    // テキストセル: セルサイズの35%、最大20px
+                                    minOf(baseSize * 0.35f, 20f * density.density)
+                                }.coerceAtLeast(8f * density.density)  // 最小8px
+
                                 val fontColor = cell?.fontInfo?.color ?: 0xFF000000L
                                 val textColorInt = (fontColor and 0xFFFFFF).toInt()
 
                                 drawContext.canvas.nativeCanvas.apply {
                                     val paint = android.graphics.Paint().apply {
                                         color = (0xFF000000 or textColorInt.toLong()).toInt()
-                                        textSize = fontSize * density.density
+                                        textSize = fontSize
                                         textAlign = android.graphics.Paint.Align.CENTER
                                         isAntiAlias = true
                                         if (cell?.fontInfo?.bold == true) {
@@ -347,7 +489,7 @@ private fun MapCanvas(
                                     val textX = x + mergedWidth / 2
                                     val textY = y + mergedHeight / 2 + fontSize / 3
 
-                                    drawText(value, textX, textY, paint)
+                                    drawText(value.toString(), textX, textY, paint)
                                 }
                             }
                         }
@@ -387,14 +529,24 @@ private fun MapCanvas(
 
                         // テキストを描画
                         cell?.value?.let { value ->
-                            val fontSize = (cell.fontInfo.size * scale * 0.8f).coerceIn(4f, 24f)
+                            // Web版と同様にセルサイズベースでフォントサイズを計算
+                            val isNumeric = value.toString().matches(Regex("^\\d+$"))
+                            val cellSize = minOf(cellWidth, cellHeight)
+                            val fontSize = if (isNumeric) {
+                                // 数値セル: セルサイズの45%、最大14px
+                                minOf(cellSize * 0.45f, 14f * density.density)
+                            } else {
+                                // テキストセル: セルサイズの40%、最大12px
+                                minOf(cellSize * 0.4f, 12f * density.density)
+                            }.coerceAtLeast(8f * density.density)  // 最小8px
+
                             val fontColor = cell.fontInfo.color
                             val textColorInt = (fontColor and 0xFFFFFF).toInt()
 
                             drawContext.canvas.nativeCanvas.apply {
                                 val paint = android.graphics.Paint().apply {
                                     color = (0xFF000000 or textColorInt.toLong()).toInt()
-                                    textSize = fontSize * density.density
+                                    textSize = fontSize
                                     textAlign = android.graphics.Paint.Align.CENTER
                                     isAntiAlias = true
                                 }
@@ -402,8 +554,24 @@ private fun MapCanvas(
                                 val textX = x + cellWidth / 2
                                 val textY = y + cellHeight / 2 + fontSize / 3
 
-                                drawText(value, textX, textY, paint)
+                                drawText(value.toString(), textX, textY, paint)
                             }
+                        }
+
+                        // 選択されたセルのハイライト描画
+                        if (selectedCellsSet.contains(cellKey)) {
+                            drawRect(
+                                color = colorSelected.copy(alpha = 0.3f),
+                                topLeft = Offset(x, y),
+                                size = Size(cellWidth, cellHeight)
+                            )
+                            // 枠線
+                            drawRect(
+                                color = colorSelected,
+                                topLeft = Offset(x, y),
+                                size = Size(cellWidth, cellHeight),
+                                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                            )
                         }
                     }
                 }
@@ -541,6 +709,240 @@ private fun NoMapPlaceholder(
             Icon(Icons.Default.FolderOpen, null)
             Spacer(modifier = Modifier.width(8.dp))
             Text("マップファイルを開く")
+        }
+    }
+}
+
+/**
+ * セル選択モード中のオーバーレイ
+ */
+@Composable
+private fun CellSelectionOverlay(
+    selectedCount: Int,
+    onCancel: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(16.dp)
+    ) {
+        Card(
+            modifier = Modifier.align(Alignment.TopCenter),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            )
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "4つの角をタップ ($selectedCount/4)",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                TextButton(onClick = onCancel) {
+                    Text("キャンセル")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * セルタップ時の情報を保持するデータクラス
+ */
+private data class CellTapInfo(
+    val row: Int,
+    val col: Int,
+    val blockName: String,
+    val number: String,
+    val items: List<ShoppingItem>
+)
+
+/**
+ * セル内のアイテム一覧を表示するダイアログ
+ */
+@Composable
+private fun CellItemsDialog(
+    blockName: String,
+    number: String,
+    items: List<ShoppingItem>,
+    onDismiss: () -> Unit,
+    onUpdateStatus: (String, PurchaseStatus) -> Unit,
+    onOpenUrl: (String) -> Unit
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            shape = MaterialTheme.shapes.large
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+                // ヘッダー
+                Text(
+                    text = "$blockName - $number",
+                    style = MaterialTheme.typography.titleLarge
+                )
+
+                Text(
+                    text = "${items.size}件のアイテム",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // アイテム一覧
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 400.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(items) { item ->
+                        CellItemRow(
+                            item = item,
+                            onStatusChange = { status ->
+                                onUpdateStatus(item.id, status)
+                            },
+                            onOpenUrl = {
+                                item.url?.let { onOpenUrl(it) }
+                            }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // 閉じるボタン
+                TextButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Text("閉じる")
+                }
+            }
+        }
+    }
+}
+
+/**
+ * ダイアログ内のアイテム行
+ */
+@Composable
+private fun CellItemRow(
+    item: ShoppingItem,
+    onStatusChange: (PurchaseStatus) -> Unit,
+    onOpenUrl: () -> Unit
+) {
+    var showStatusMenu by remember { mutableStateOf(false) }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = when (item.purchaseStatus) {
+                PurchaseStatus.PURCHASED -> Color(0xFFE8F5E9)
+                PurchaseStatus.SOLD_OUT -> Color(0xFFFFCDD2)
+                PurchaseStatus.ABSENT -> Color(0xFFFFF9C4)
+                PurchaseStatus.POSTPONE -> Color(0xFFE1BEE7)
+                PurchaseStatus.LATE -> Color(0xFFBBDEFB)
+                else -> MaterialTheme.colorScheme.surface
+            }
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            // サークル名とタイトル
+            Text(
+                text = item.circle,
+                style = MaterialTheme.typography.titleSmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            if (item.title.isNotBlank()) {
+                Text(
+                    text = item.title,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // 下部：価格、ステータス、URLボタン
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // 価格
+                Text(
+                    text = item.priceDisplay,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // URLボタン
+                    if (!item.url.isNullOrBlank()) {
+                        IconButton(
+                            onClick = onOpenUrl,
+                            modifier = Modifier.size(32.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.OpenInNew,
+                                contentDescription = "URLを開く",
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    // ステータス変更ボタン
+                    Box {
+                        TextButton(
+                            onClick = { showStatusMenu = true }
+                        ) {
+                            Text(
+                                text = item.purchaseStatus.displayName,
+                                color = Color(item.purchaseStatus.colorHex)
+                            )
+                        }
+
+                        DropdownMenu(
+                            expanded = showStatusMenu,
+                            onDismissRequest = { showStatusMenu = false }
+                        ) {
+                            PurchaseStatus.entries.forEach { status ->
+                                DropdownMenuItem(
+                                    text = {
+                                        Text(
+                                            text = status.displayName,
+                                            color = Color(status.colorHex)
+                                        )
+                                    },
+                                    onClick = {
+                                        onStatusChange(status)
+                                        showStatusMenu = false
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

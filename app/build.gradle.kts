@@ -82,6 +82,9 @@ dependencies {
     // Apache Commons CSV
     implementation("org.apache.commons:commons-csv:1.10.0")
 
+    // Gson for JSON serialization
+    implementation("com.google.code.gson:gson:2.10.1")
+
     // Testing
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
