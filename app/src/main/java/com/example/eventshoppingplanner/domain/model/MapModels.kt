@@ -88,20 +88,26 @@ data class NumberCellInfo(
 )
 
 /**
- * セルグループ（壁ブロック用）
- */
-data class CellGroup(
-    val type: CellGroupType = CellGroupType.RANGE,
-    val cells: List<Pair<Int, Int>> = emptyList()
-)
-
-/**
  * セルグループタイプ
  */
 enum class CellGroupType {
-    RANGE,      // 範囲指定
+    RANGE,      // 範囲指定（2点間の矩形）
     INDIVIDUAL  // 個別セル指定
 }
+
+/**
+ * セルグループ（壁ブロック/複数範囲ブロック用）
+ */
+data class CellGroup(
+    val type: CellGroupType = CellGroupType.RANGE,
+    // RANGEタイプ用
+    val startRow: Int = 0,
+    val startCol: Int = 0,
+    val endRow: Int = 0,
+    val endCol: Int = 0,
+    // INDIVIDUALタイプ用
+    val cells: List<Pair<Int, Int>> = emptyList()
+)
 
 /**
  * ブロック定義

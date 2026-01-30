@@ -35,9 +35,25 @@ data class MapUiState(
     val errorMessage: String? = null,
     val cellItemsMap: Map<String, List<ShoppingItem>> = emptyMap(),
     // ブロック編集関連
-    val isBlockDefinitionPanelOpen: Boolean = false,
+    val isBlockDefinitionPanelOpen: Boolean = false,  // パネルが論理的に開いているか（状態保持）
+    val isBlockDefinitionPanelVisible: Boolean = false,  // パネルが実際に表示されているか
     val cellSelectionMode: CellSelectionMode = CellSelectionMode.NONE,
-    val selectedCells: List<Pair<Int, Int>> = emptyList()
+    val selectedCells: List<Pair<Int, Int>> = emptyList(),
+    val currentSelectionType: CellSelectionType? = null,
+    // セル選択中に保持する編集状態
+    val pendingEditState: BlockEditState? = null
+)
+
+/**
+ * ブロック編集状態（セル選択中に保持）
+ */
+data class BlockEditState(
+    val editingBlock: BlockDefinition?,
+    val isAddingNew: Boolean,
+    val editMode: EditMode,
+    val wallCellGroups: List<CellGroup>,
+    val multiRanges: List<MultiRange>,
+    val currentBlocks: List<BlockDefinition>
 )
 
 /**
@@ -45,7 +61,9 @@ data class MapUiState(
  */
 enum class CellSelectionMode {
     NONE,           // 通常モード
-    CORNER_SELECT   // 4角選択モード
+    CORNER_SELECT,  // 4角選択モード
+    RANGE_SELECT,   // 範囲選択モード（2点）
+    INDIVIDUAL_SELECT // 個別セル選択モード
 }
 
 @HiltViewModel
@@ -295,24 +313,41 @@ class MapViewModel @Inject constructor(
     // ===== ブロック定義パネル関連 =====
 
     fun openBlockDefinitionPanel() {
-        _uiState.update { it.copy(isBlockDefinitionPanelOpen = true) }
+        _uiState.update {
+            it.copy(
+                isBlockDefinitionPanelOpen = true,
+                isBlockDefinitionPanelVisible = true
+            )
+        }
     }
 
     fun closeBlockDefinitionPanel() {
         _uiState.update {
             it.copy(
                 isBlockDefinitionPanelOpen = false,
+                isBlockDefinitionPanelVisible = false,
                 cellSelectionMode = CellSelectionMode.NONE,
-                selectedCells = emptyList()
+                selectedCells = emptyList(),
+                currentSelectionType = null,
+                pendingEditState = null
             )
         }
     }
 
-    fun startCellSelection() {
+    fun startCellSelection(selectionType: CellSelectionType, editState: BlockEditState) {
+        val mode = when (selectionType) {
+            CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> CellSelectionMode.CORNER_SELECT
+            CellSelectionType.RANGE_START -> CellSelectionMode.RANGE_SELECT
+            CellSelectionType.INDIVIDUAL -> CellSelectionMode.INDIVIDUAL_SELECT
+        }
         _uiState.update {
             it.copy(
-                cellSelectionMode = CellSelectionMode.CORNER_SELECT,
-                selectedCells = emptyList()
+                isBlockDefinitionPanelOpen = true,  // 状態保持のためtrueを維持
+                isBlockDefinitionPanelVisible = false,  // UIは非表示
+                cellSelectionMode = mode,
+                selectedCells = emptyList(),
+                currentSelectionType = selectionType,
+                pendingEditState = editState  // 編集状態を保存
             )
         }
     }
@@ -320,24 +355,90 @@ class MapViewModel @Inject constructor(
     fun cancelCellSelection() {
         _uiState.update {
             it.copy(
+                isBlockDefinitionPanelVisible = true,  // パネルを再表示
                 cellSelectionMode = CellSelectionMode.NONE,
-                selectedCells = emptyList()
+                selectedCells = emptyList(),
+                currentSelectionType = null
+                // pendingEditStateは保持（BlockDefinitionPanelで復元に使う）
             )
         }
+    }
+
+    fun clearPendingEditState() {
+        _uiState.update { it.copy(pendingEditState = null) }
+    }
+
+    fun removeSelectedCell(row: Int, col: Int) {
+        val currentCells = _uiState.value.selectedCells.toMutableList()
+        currentCells.remove(Pair(row, col))
+        _uiState.update { it.copy(selectedCells = currentCells) }
     }
 
     fun addSelectedCell(row: Int, col: Int) {
         val currentCells = _uiState.value.selectedCells.toMutableList()
         val newCell = Pair(row, col)
+        val selectionType = _uiState.value.currentSelectionType
 
-        // 既に選択済みの場合は削除
-        if (currentCells.contains(newCell)) {
-            currentCells.remove(newCell)
-        } else if (currentCells.size < 4) {
-            currentCells.add(newCell)
+        when (selectionType) {
+            CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> {
+                // 4角選択: 最大4つ、同じセルは削除
+                if (currentCells.contains(newCell)) {
+                    currentCells.remove(newCell)
+                } else if (currentCells.size < 4) {
+                    currentCells.add(newCell)
+                }
+                _uiState.update { it.copy(selectedCells = currentCells) }
+                // 4つ選択しても自動では戻らない（確定ボタンで戻る）
+            }
+            CellSelectionType.RANGE_START -> {
+                // 範囲選択: 最大2つ
+                if (currentCells.contains(newCell)) {
+                    currentCells.remove(newCell)
+                } else if (currentCells.size < 2) {
+                    currentCells.add(newCell)
+                }
+                _uiState.update { it.copy(selectedCells = currentCells) }
+                // 2つ選択しても自動では戻らない（確定ボタンで戻る）
+            }
+            CellSelectionType.INDIVIDUAL -> {
+                // 個別セル選択: 無制限、トグル
+                if (currentCells.contains(newCell)) {
+                    currentCells.remove(newCell)
+                } else {
+                    currentCells.add(newCell)
+                }
+                _uiState.update { it.copy(selectedCells = currentCells) }
+            }
+            null -> {
+                // 旧来の動作（フォールバック）
+                if (currentCells.contains(newCell)) {
+                    currentCells.remove(newCell)
+                } else if (currentCells.size < 4) {
+                    currentCells.add(newCell)
+                }
+                _uiState.update { it.copy(selectedCells = currentCells) }
+            }
         }
+    }
 
-        _uiState.update { it.copy(selectedCells = currentCells) }
+    fun confirmSelection() {
+        // セル選択を確定してパネルを再表示
+        _uiState.update {
+            it.copy(
+                isBlockDefinitionPanelVisible = true,
+                cellSelectionMode = CellSelectionMode.NONE
+            )
+        }
+    }
+
+    fun confirmIndividualSelection() {
+        // 個別セル選択モードを確定してパネルを再表示
+        _uiState.update {
+            it.copy(
+                isBlockDefinitionPanelVisible = true,
+                cellSelectionMode = CellSelectionMode.NONE
+            )
+        }
     }
 
     fun updateBlocks(blocks: List<BlockDefinition>) {

@@ -671,6 +671,8 @@ object XlsxMapParser {
 
     /**
      * ブロック名かどうかを判定
+     * 条件: 1〜4文字のカタカナ、ひらがな、アルファベット、漢字、数字、またはそれらの組み合わせ
+     * ただし、数字のみの場合はブロック名ではなく数値セルとして扱うため除外
      */
     private fun isBlockName(value: String): Boolean {
         val str = value.trim()
@@ -681,7 +683,178 @@ object XlsxMapParser {
     }
 
     /**
-     * セルデータからブロックを検出
+     * 数値セルかどうかを判定（1〜100の整数）
+     */
+    private fun isNumberCell(value: String?): Boolean {
+        if (value == null) return false
+        val num = value.toIntOrNull() ?: return false
+        return num in 1..100
+    }
+
+    /**
+     * 太い罫線かどうかを判定（medium/thick/double）
+     */
+    private fun isMediumOrThickBorder(weight: BorderWeight): Boolean {
+        return weight == BorderWeight.MEDIUM ||
+                weight == BorderWeight.THICK ||
+                weight == BorderWeight.DOUBLE
+    }
+
+    /**
+     * 太い罫線で囲まれた領域を検出（Flood Fill方式）
+     * 指定セルから開始し、太い罫線に囲まれた領域全体を返す
+     * 多角形（凹型含む）に対応
+     */
+    private fun findBorderedRegion(
+        startRow: Int,
+        startCol: Int,
+        cellMap: Map<String, CellData>,
+        maxRow: Int,
+        maxCol: Int
+    ): Set<String> {
+        val region = mutableSetOf<String>()
+        val queue = ArrayDeque<Pair<Int, Int>>()
+        queue.add(Pair(startRow, startCol))
+        val MAX_REGION_SIZE = 2000 // 1つの領域の最大セル数
+
+        while (queue.isNotEmpty() && region.size < MAX_REGION_SIZE) {
+            val (row, col) = queue.removeFirst()
+            val key = "$row-$col"
+
+            if (region.contains(key)) continue
+            if (row < 1 || row > maxRow || col < 1 || col > maxCol) continue
+
+            region.add(key)
+
+            val cell = cellMap[key]
+            val border = cell?.borders ?: CellBorders()
+
+            // 上方向へ（太い罫線がなければ進む）
+            if (!isMediumOrThickBorder(border.top.style)) {
+                if (row > 1) {
+                    val aboveCell = cellMap["${row - 1}-$col"]
+                    val aboveBorder = aboveCell?.borders ?: CellBorders()
+                    if (!isMediumOrThickBorder(aboveBorder.bottom.style)) {
+                        val aboveKey = "${row - 1}-$col"
+                        if (!region.contains(aboveKey)) {
+                            queue.add(Pair(row - 1, col))
+                        }
+                    }
+                }
+            }
+
+            // 下方向へ
+            if (!isMediumOrThickBorder(border.bottom.style)) {
+                if (row < maxRow) {
+                    val belowCell = cellMap["${row + 1}-$col"]
+                    val belowBorder = belowCell?.borders ?: CellBorders()
+                    if (!isMediumOrThickBorder(belowBorder.top.style)) {
+                        val belowKey = "${row + 1}-$col"
+                        if (!region.contains(belowKey)) {
+                            queue.add(Pair(row + 1, col))
+                        }
+                    }
+                }
+            }
+
+            // 左方向へ
+            if (!isMediumOrThickBorder(border.left.style)) {
+                if (col > 1) {
+                    val leftCell = cellMap["$row-${col - 1}"]
+                    val leftBorder = leftCell?.borders ?: CellBorders()
+                    if (!isMediumOrThickBorder(leftBorder.right.style)) {
+                        val leftKey = "$row-${col - 1}"
+                        if (!region.contains(leftKey)) {
+                            queue.add(Pair(row, col - 1))
+                        }
+                    }
+                }
+            }
+
+            // 右方向へ
+            if (!isMediumOrThickBorder(border.right.style)) {
+                if (col < maxCol) {
+                    val rightCell = cellMap["$row-${col + 1}"]
+                    val rightBorder = rightCell?.borders ?: CellBorders()
+                    if (!isMediumOrThickBorder(rightBorder.left.style)) {
+                        val rightKey = "$row-${col + 1}"
+                        if (!region.contains(rightKey)) {
+                            queue.add(Pair(row, col + 1))
+                        }
+                    }
+                }
+            }
+        }
+
+        return region
+    }
+
+    /**
+     * 領域内の数値セルを抽出
+     */
+    private fun extractNumberCellsFromRegion(
+        region: Set<String>,
+        cellMap: Map<String, CellData>,
+        mergeMap: Map<String, Pair<Int, Int>>
+    ): List<NumberCellInfo> {
+        val numberCells = mutableListOf<NumberCellInfo>()
+
+        region.forEach { key ->
+            val parts = key.split("-")
+            val row = parts[0].toInt()
+            val col = parts[1].toInt()
+
+            // 結合セルの子セルは除外
+            val mergeParent = mergeMap[key]
+            if (mergeParent != null && (mergeParent.first != row || mergeParent.second != col)) {
+                return@forEach
+            }
+
+            val cell = cellMap[key]
+            val value = cell?.value
+
+            if (isNumberCell(value)) {
+                val numValue = value!!.toInt()
+                numberCells.add(NumberCellInfo(row, col, numValue))
+            }
+        }
+
+        return numberCells.sortedBy { it.value }
+    }
+
+    /**
+     * 領域の境界ボックスを計算
+     */
+    private fun calculateBoundingBox(region: Set<String>): BoundingBox {
+        var minRow = Int.MAX_VALUE
+        var minCol = Int.MAX_VALUE
+        var maxRow = 0
+        var maxCol = 0
+
+        region.forEach { key ->
+            val parts = key.split("-")
+            val row = parts[0].toInt()
+            val col = parts[1].toInt()
+
+            minRow = minOf(minRow, row)
+            minCol = minOf(minCol, col)
+            maxRow = maxOf(maxRow, row)
+            maxCol = maxOf(maxCol, col)
+        }
+
+        return BoundingBox(minRow, minCol, maxRow, maxCol)
+    }
+
+    private data class BoundingBox(
+        val startRow: Int,
+        val startCol: Int,
+        val endRow: Int,
+        val endCol: Int
+    )
+
+    /**
+     * セルデータからブロックを検出（WEBアプリ版と同じFlood Fillアルゴリズム）
+     * 太い罫線で囲まれた領域内のブロック名セルと数値セルを検出
      */
     private fun detectBlocksFromCells(
         cells: List<CellData>,
@@ -690,66 +863,129 @@ object XlsxMapParser {
         maxCol: Int
     ): List<BlockDefinition> {
         val blocks = mutableListOf<BlockDefinition>()
-        var colorIndex = 0
-        val blockNameCells = mutableListOf<Triple<Int, Int, String>>()
-
-        // セルからブロック名を検出
-        cells.forEach { cell ->
-            val value = cell.value
-            if (value != null && isBlockName(value)) {
-                blockNameCells.add(Triple(cell.row, cell.col, value))
-            }
-        }
-
-        // 結合セルからもブロック名を検出
-        mergedCells.forEach { merged ->
-            val value = merged.value
-            if (value != null && isBlockName(value)) {
-                val exists = blockNameCells.any { it.first == merged.startRow && it.second == merged.startCol }
-                if (!exists) {
-                    blockNameCells.add(Triple(merged.startRow, merged.startCol, value))
-                }
-            }
-        }
-
-        Log.d(TAG, "Block name cells found: ${blockNameCells.size}")
+        val globalProcessedCells = mutableSetOf<String>() // グローバルな処理済みセル
 
         // セルをマップに変換
         val cellMap = cells.associateBy { "${it.row}-${it.col}" }
 
-        blockNameCells.forEach { (blockRow, blockCol, name) ->
-            val numberCells = mutableListOf<NumberCellInfo>()
-            val searchRadius = 15
-
-            // 周辺の数値セルを検索
-            for (r in maxOf(1, blockRow - searchRadius)..minOf(maxRow, blockRow + searchRadius)) {
-                for (c in maxOf(1, blockCol - searchRadius)..minOf(maxCol, blockCol + searchRadius)) {
-                    val cell = cellMap["$r-$c"]
-                    val num = cell?.value?.toIntOrNull()
-                    if (num != null && num in 1..100) {
-                        numberCells.add(NumberCellInfo(r, c, num))
-                    }
+        // 結合セルの親セルマップを作成
+        val mergeMap = mutableMapOf<String, Pair<Int, Int>>()
+        mergedCells.forEach { merged ->
+            for (r in merged.startRow..merged.endRow) {
+                for (c in merged.startCol..merged.endCol) {
+                    mergeMap["$r-$c"] = Pair(merged.startRow, merged.startCol)
                 }
             }
+        }
 
-            if (numberCells.isNotEmpty()) {
-                val allRows = numberCells.map { it.row } + blockRow
-                val allCols = numberCells.map { it.col } + blockCol
+        // STEP 1: 4セル以上の結合セルでブロック名を持つものを探す
+        val blockNameMerges = mergedCells.filter { merge ->
+            val rows = merge.endRow - merge.startRow + 1
+            val cols = merge.endCol - merge.startCol + 1
+            val cellCount = rows * cols
+            cellCount >= 4 && merge.value != null && isBlockName(merge.value)
+        }
 
-                blocks.add(
-                    BlockDefinition(
-                        name = name,
-                        startRow = allRows.minOrNull() ?: blockRow,
-                        startCol = allCols.minOrNull() ?: blockCol,
-                        endRow = allRows.maxOrNull() ?: blockRow,
-                        endCol = allCols.maxOrNull() ?: blockCol,
-                        numberCells = numberCells.sortedBy { it.value },
-                        color = blockColors[colorIndex % blockColors.size],
-                        isAutoDetected = true
-                    )
+        Log.d(TAG, "Block name merges found (4+ cells): ${blockNameMerges.size}")
+
+        // STEP 2: ブロック名でグループ化（同じ名前のブロックは統合）
+        data class BlockGroup(
+            val regions: MutableList<Set<String>> = mutableListOf(),
+            val numberCells: MutableList<NumberCellInfo> = mutableListOf()
+        )
+        val blockGroups = mutableMapOf<String, BlockGroup>()
+
+        blockNameMerges.forEach { merge ->
+            val blockName = merge.value!!.trim()
+
+            // このブロック名セルが既に処理済みかチェック
+            val mergeKey = "${merge.startRow}-${merge.startCol}"
+            if (globalProcessedCells.contains(mergeKey)) return@forEach
+
+            // STEP 3: ブロック名セルから太い罫線で囲まれた領域を検出
+            val region = findBorderedRegion(
+                merge.startRow,
+                merge.startCol,
+                cellMap,
+                maxRow,
+                maxCol
+            )
+
+            // この領域内のセルをグローバルに処理済みとしてマーク
+            region.forEach { key -> globalProcessedCells.add(key) }
+
+            // STEP 4: 領域内の数値セルを抽出
+            val numberCells = extractNumberCellsFromRegion(region, cellMap, mergeMap)
+
+            // 同じブロック名のグループに追加
+            if (blockGroups.containsKey(blockName)) {
+                val group = blockGroups[blockName]!!
+                group.regions.add(region)
+                group.numberCells.addAll(numberCells)
+            } else {
+                blockGroups[blockName] = BlockGroup(
+                    regions = mutableListOf(region),
+                    numberCells = numberCells.toMutableList()
                 )
-                colorIndex++
             }
+        }
+
+        // STEP 5: ブロック定義を作成
+        var colorIndex = 0
+        blockGroups.forEach { (blockName, group) ->
+            if (group.numberCells.isEmpty()) return@forEach
+
+            // 全領域を統合した境界ボックスを計算
+            val allCells = mutableSetOf<String>()
+            group.regions.forEach { region ->
+                allCells.addAll(region)
+            }
+
+            val boundingBox = calculateBoundingBox(allCells)
+
+            // 重複を除去してソート
+            val uniqueNumberCells = group.numberCells
+                .distinctBy { "${it.row}-${it.col}" }
+                .sortedBy { it.value }
+
+            // 領域が矩形かどうかを判定（多角形の場合はcellGroupsを作成）
+            val boxArea = (boundingBox.endRow - boundingBox.startRow + 1) *
+                    (boundingBox.endCol - boundingBox.startCol + 1)
+            val isPolygon = allCells.size < boxArea * 0.95 // 5%以上の差があれば多角形とみなす
+
+            val cellGroups = if (isPolygon) {
+                group.regions.map { region ->
+                    CellGroup(
+                        type = CellGroupType.INDIVIDUAL,
+                        cells = region.map { key ->
+                            val parts = key.split("-")
+                            Pair(parts[0].toInt(), parts[1].toInt())
+                        }
+                    )
+                }
+            } else {
+                emptyList()
+            }
+
+            blocks.add(
+                BlockDefinition(
+                    name = blockName,
+                    startRow = boundingBox.startRow,
+                    startCol = boundingBox.startCol,
+                    endRow = boundingBox.endRow,
+                    endCol = boundingBox.endCol,
+                    numberCells = uniqueNumberCells,
+                    color = blockColors[colorIndex % blockColors.size],
+                    isAutoDetected = true,
+                    cellGroups = if (cellGroups.isNotEmpty()) cellGroups else emptyList()
+                )
+            )
+            colorIndex++
+        }
+
+        Log.d(TAG, "Detected blocks: ${blocks.size}")
+        blocks.forEach { block ->
+            Log.d(TAG, "  Block '${block.name}': ${block.numberCells.size} number cells")
         }
 
         return blocks

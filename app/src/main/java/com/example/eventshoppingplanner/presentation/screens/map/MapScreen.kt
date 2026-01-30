@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.eventshoppingplanner.domain.model.*
@@ -79,13 +80,19 @@ fun MapScreen(
     uiState.currentMapData?.let { mapData ->
         BlockDefinitionPanel(
             isOpen = uiState.isBlockDefinitionPanelOpen,
+            isVisible = uiState.isBlockDefinitionPanelVisible,
             onClose = { viewModel.closeBlockDefinitionPanel() },
             mapData = mapData,
             selectedCells = uiState.selectedCells,
-            onStartCellSelection = { viewModel.startCellSelection() },
+            onStartCellSelection = { selectionType, editState ->
+                viewModel.startCellSelection(selectionType, editState)
+            },
             onCancelCellSelection = { viewModel.cancelCellSelection() },
             onUpdateBlocks = { blocks -> viewModel.updateBlocks(blocks) },
-            isInSelectionMode = uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT
+            isInSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
+            currentSelectionType = uiState.currentSelectionType,
+            pendingEditState = uiState.pendingEditState,
+            onClearPendingEditState = { viewModel.clearPendingEditState() }
         )
     }
 
@@ -164,11 +171,12 @@ fun MapScreen(
                                 offsetY = uiState.offsetY,
                                 cellItemsMap = uiState.cellItemsMap,
                                 selectedCells = uiState.selectedCells,
-                                isSelectionMode = uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT,
+                                isSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
+                                currentSelectionType = uiState.currentSelectionType,
                                 onPan = { dx, dy -> viewModel.pan(dx, dy) },
                                 onCellTap = { row, col, items ->
                                     // セル選択モード中は選択に使用
-                                    if (uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT) {
+                                    if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
                                         viewModel.addSelectedCell(row, col)
                                     } else if (items.isNotEmpty()) {
                                         val firstItem = items.first()
@@ -180,14 +188,35 @@ fun MapScreen(
                                             items = items
                                         )
                                     }
+                                },
+                                onSelectedCellTap = { row, col ->
+                                    // 選択済みセルをタップしたら選択解除
+                                    viewModel.removeSelectedCell(row, col)
                                 }
                             )
                         }
 
                         // セル選択モード中のオーバーレイ
-                        if (uiState.cellSelectionMode == CellSelectionMode.CORNER_SELECT) {
+                        if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
+                            val (title, requiredCount) = when (uiState.currentSelectionType) {
+                                CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> "4つの角をタップ" to 4
+                                CellSelectionType.RANGE_START -> "開始点と終了点をタップ" to 2
+                                CellSelectionType.INDIVIDUAL -> "セルをタップして選択" to -1
+                                null -> "セルを選択" to 4
+                            }
+                            // 確定ボタンの表示条件
+                            val canConfirm = when (uiState.currentSelectionType) {
+                                CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> uiState.selectedCells.size >= 4
+                                CellSelectionType.RANGE_START -> uiState.selectedCells.size >= 2
+                                CellSelectionType.INDIVIDUAL -> uiState.selectedCells.isNotEmpty()
+                                null -> uiState.selectedCells.size >= 4
+                            }
                             CellSelectionOverlay(
                                 selectedCount = uiState.selectedCells.size,
+                                requiredCount = requiredCount,
+                                title = title,
+                                showConfirmButton = canConfirm,
+                                onConfirm = { viewModel.confirmSelection() },
                                 onCancel = { viewModel.cancelCellSelection() }
                             )
                         }
@@ -253,8 +282,10 @@ private fun MapCanvas(
     cellItemsMap: Map<String, List<ShoppingItem>>,
     selectedCells: List<Pair<Int, Int>> = emptyList(),
     isSelectionMode: Boolean = false,
+    currentSelectionType: CellSelectionType? = null,
     onPan: (Float, Float) -> Unit,
-    onCellTap: (Int, Int, List<ShoppingItem>) -> Unit = { _, _, _ -> }
+    onCellTap: (Int, Int, List<ShoppingItem>) -> Unit = { _, _, _ -> },
+    onSelectedCellTap: (Int, Int) -> Unit = { _, _ -> }  // 選択済みセルタップ時のコールバック
 ) {
     val density = LocalDensity.current
     val scale = zoomLevel.scale
@@ -262,6 +293,23 @@ private fun MapCanvas(
     // 選択済みセルのセット
     val selectedCellsSet = remember(selectedCells) {
         selectedCells.map { "${it.first}-${it.second}" }.toSet()
+    }
+
+    // 4角選択の場合の範囲を計算
+    val selectionBounds = remember(selectedCells, currentSelectionType) {
+        if ((currentSelectionType == CellSelectionType.CORNER ||
+                    currentSelectionType == CellSelectionType.MULTI_CORNER) &&
+            selectedCells.size >= 4) {
+            val rows = selectedCells.map { it.first }
+            val cols = selectedCells.map { it.second }
+            val minRow = rows.minOrNull() ?: 0
+            val maxRow = rows.maxOrNull() ?: 0
+            val minCol = cols.minOrNull() ?: 0
+            val maxCol = cols.maxOrNull() ?: 0
+            if (minRow > 0 && maxRow > 0) {
+                SelectionBounds(minRow, minCol, maxRow, maxCol)
+            } else null
+        } else null
     }
 
     // セルマップを作成
@@ -288,6 +336,7 @@ private fun MapCanvas(
     val colorRed = Color(0xFFFFCDD2)
     val colorWhite = Color.White
     val colorSelected = Color(0xFF2196F3)  // 選択セルの色
+    val colorSelectionArea = Color(0xFF2196F3).copy(alpha = 0.15f)  // 選択範囲の塗りつぶし色
 
     // タップ位置からセル座標を計算する関数
     fun findCellAtPosition(tapX: Float, tapY: Float): Pair<Int, Int>? {
@@ -324,7 +373,7 @@ private fun MapCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(Unit) {
+                .pointerInput(selectedCellsSet, isSelectionMode) {
                     detectTapGestures { offset ->
                         val cellPos = findCellAtPosition(offset.x, offset.y)
                         cellPos?.let { (row, col) ->
@@ -333,8 +382,14 @@ private fun MapCanvas(
                             val actualRow = mergedInfo?.startRow ?: row
                             val actualCol = mergedInfo?.startCol ?: col
                             val key = "$actualRow-$actualCol"
-                            val items = cellItemsMap[key] ?: emptyList()
-                            onCellTap(actualRow, actualCol, items)
+
+                            // セル選択モード中で、既に選択済みのセルをタップした場合は選択解除
+                            if (isSelectionMode && selectedCellsSet.contains(key)) {
+                                onSelectedCellTap(actualRow, actualCol)
+                            } else {
+                                val items = cellItemsMap[key] ?: emptyList()
+                                onCellTap(actualRow, actualCol, items)
+                            }
                         }
                     }
                 }
@@ -492,6 +547,60 @@ private fun MapCanvas(
                                     drawText(value.toString(), textX, textY, paint)
                                 }
                             }
+
+                            // 結合セルの選択マーカー描画
+                            if (selectedCellsSet.contains(mergeKey)) {
+                                // 半透明の青いオーバーレイ
+                                drawRect(
+                                    color = colorSelected.copy(alpha = 0.3f),
+                                    topLeft = Offset(x, y),
+                                    size = Size(mergedWidth, mergedHeight)
+                                )
+                                // 枠線
+                                drawRect(
+                                    color = colorSelected,
+                                    topLeft = Offset(x, y),
+                                    size = Size(mergedWidth, mergedHeight),
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                                )
+
+                                // マーカー（番号付きの円）を描画
+                                val markerIndex = selectedCells.indexOfFirst {
+                                    it.first == mergedInfo.startRow && it.second == mergedInfo.startCol
+                                }
+                                if (markerIndex >= 0) {
+                                    val markerRadius = minOf(mergedWidth, mergedHeight) * 0.25f
+                                    val markerCenterX = x + mergedWidth / 2
+                                    val markerCenterY = y + mergedHeight / 2
+
+                                    // 円の背景
+                                    drawCircle(
+                                        color = Color(0xFF1976D2),
+                                        radius = markerRadius,
+                                        center = Offset(markerCenterX, markerCenterY)
+                                    )
+                                    // 円の枠線
+                                    drawCircle(
+                                        color = Color.White,
+                                        radius = markerRadius,
+                                        center = Offset(markerCenterX, markerCenterY),
+                                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
+                                    )
+
+                                    // 番号を描画
+                                    drawContext.canvas.nativeCanvas.apply {
+                                        val markerPaint = android.graphics.Paint().apply {
+                                            color = android.graphics.Color.WHITE
+                                            textSize = markerRadius * 1.2f
+                                            textAlign = android.graphics.Paint.Align.CENTER
+                                            typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                            isAntiAlias = true
+                                        }
+                                        val markerTextY = markerCenterY + markerRadius * 0.35f
+                                        drawText("${markerIndex + 1}", markerCenterX, markerTextY, markerPaint)
+                                    }
+                                }
+                            }
                         }
                     } else {
                         // 通常セル
@@ -558,8 +667,9 @@ private fun MapCanvas(
                             }
                         }
 
-                        // 選択されたセルのハイライト描画
+                        // 選択されたセルのハイライトとマーカー描画
                         if (selectedCellsSet.contains(cellKey)) {
+                            // 半透明の青いオーバーレイ
                             drawRect(
                                 color = colorSelected.copy(alpha = 0.3f),
                                 topLeft = Offset(x, y),
@@ -572,13 +682,92 @@ private fun MapCanvas(
                                 size = Size(cellWidth, cellHeight),
                                 style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
                             )
+
+                            // マーカー（番号付きの円）を描画
+                            val markerIndex = selectedCells.indexOfFirst { it.first == row && it.second == col }
+                            if (markerIndex >= 0) {
+                                val markerRadius = minOf(cellWidth, cellHeight) * 0.35f
+                                val markerCenterX = x + cellWidth / 2
+                                val markerCenterY = y + cellHeight / 2
+
+                                // 円の背景
+                                drawCircle(
+                                    color = Color(0xFF1976D2),
+                                    radius = markerRadius,
+                                    center = Offset(markerCenterX, markerCenterY)
+                                )
+                                // 円の枠線
+                                drawCircle(
+                                    color = Color.White,
+                                    radius = markerRadius,
+                                    center = Offset(markerCenterX, markerCenterY),
+                                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2f)
+                                )
+
+                                // 番号を描画
+                                drawContext.canvas.nativeCanvas.apply {
+                                    val markerPaint = android.graphics.Paint().apply {
+                                        color = android.graphics.Color.WHITE
+                                        textSize = markerRadius * 1.2f
+                                        textAlign = android.graphics.Paint.Align.CENTER
+                                        typeface = android.graphics.Typeface.DEFAULT_BOLD
+                                        isAntiAlias = true
+                                    }
+                                    val textY = markerCenterY + markerRadius * 0.35f
+                                    drawText("${markerIndex + 1}", markerCenterX, textY, markerPaint)
+                                }
+                            }
                         }
                     }
                 }
             }
+
+            // 4角選択完了時の範囲オーバーレイ描画
+            selectionBounds?.let { bounds ->
+                val areaStartX = getColumnX(bounds.minCol)
+                val areaStartY = getRowY(bounds.minRow)
+                var areaEndX = areaStartX
+                var areaEndY = areaStartY
+
+                // 範囲の幅と高さを計算
+                for (c in bounds.minCol..bounds.maxCol) {
+                    areaEndX += (mapData.columnWidths[c] ?: mapData.defaultColumnWidth) * scale
+                }
+                for (r in bounds.minRow..bounds.maxRow) {
+                    areaEndY += (mapData.rowHeights[r] ?: mapData.defaultRowHeight) * scale
+                }
+
+                val areaWidth = areaEndX - areaStartX
+                val areaHeight = areaEndY - areaStartY
+
+                // 範囲内を薄青色で塗りつぶし
+                drawRect(
+                    color = colorSelectionArea,
+                    topLeft = Offset(areaStartX, areaStartY),
+                    size = Size(areaWidth, areaHeight)
+                )
+
+                // 範囲の枠線
+                drawRect(
+                    color = colorSelected,
+                    topLeft = Offset(areaStartX, areaStartY),
+                    size = Size(areaWidth, areaHeight),
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
+                )
+            }
         }
     }
 }
+
+/**
+ * 選択範囲の境界
+ */
+private data class SelectionBounds(
+    val minRow: Int,
+    val minCol: Int,
+    val maxRow: Int,
+    val maxCol: Int
+)
 
 /**
  * 罫線を描画
@@ -719,6 +908,10 @@ private fun NoMapPlaceholder(
 @Composable
 private fun CellSelectionOverlay(
     selectedCount: Int,
+    requiredCount: Int = 4,
+    title: String = "4つの角をタップ",
+    showConfirmButton: Boolean = false,
+    onConfirm: () -> Unit = {},
     onCancel: () -> Unit
 ) {
     Box(
@@ -732,18 +925,37 @@ private fun CellSelectionOverlay(
                 containerColor = MaterialTheme.colorScheme.primaryContainer
             )
         ) {
-            Row(
+            Column(
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalAlignment = Alignment.CenterVertically
+                horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text(
-                    text = "4つの角をタップ ($selectedCount/4)",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-                TextButton(onClick = onCancel) {
-                    Text("キャンセル")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (requiredCount > 0) "$title ($selectedCount/$requiredCount)" else "$title ($selectedCount)",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    if (showConfirmButton) {
+                        Button(
+                            onClick = onConfirm,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                        ) {
+                            Text("確定", fontSize = 12.sp)
+                        }
+                    }
+                    TextButton(onClick = onCancel) {
+                        Text("キャンセル")
+                    }
+                }
+                if (selectedCount > 0) {
+                    Text(
+                        text = "※マーカーをタップで選択解除",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f)
+                    )
                 }
             }
         }
