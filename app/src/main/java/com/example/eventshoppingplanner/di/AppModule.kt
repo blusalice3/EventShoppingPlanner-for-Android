@@ -3,6 +3,7 @@ package com.example.eventshoppingplanner.di
 import android.content.Context
 import androidx.room.Room
 import com.example.eventshoppingplanner.data.local.dao.EventDao
+import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
 import com.example.eventshoppingplanner.data.local.dao.MapDataDao
 import com.example.eventshoppingplanner.data.local.dao.ShoppingItemDao
 import com.example.eventshoppingplanner.data.local.database.AppDatabase
@@ -33,7 +34,10 @@ object AppModule {
             AppDatabase::class.java,
             "event_shopping_planner.db"
         )
-            .addMigrations(AppDatabase.MIGRATION_1_2)
+            .addMigrations(
+                AppDatabase.MIGRATION_1_2,
+                AppDatabase.MIGRATION_2_3
+            )
             .fallbackToDestructiveMigration()
             .build()
     }
@@ -54,6 +58,12 @@ object AppModule {
     @Singleton
     fun provideMapDataDao(database: AppDatabase): MapDataDao {
         return database.mapDataDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideHallDefinitionDao(database: AppDatabase): HallDefinitionDao {
+        return database.hallDefinitionDao()
     }
 
     @Provides

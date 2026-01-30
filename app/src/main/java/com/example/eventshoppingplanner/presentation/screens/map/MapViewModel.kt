@@ -6,11 +6,16 @@ import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
+import com.example.eventshoppingplanner.data.local.entity.HallDefinitionEntity
 import com.example.eventshoppingplanner.domain.model.*
 import com.example.eventshoppingplanner.domain.repository.EventRepository
 import com.example.eventshoppingplanner.domain.repository.MapDataRepository
 import com.example.eventshoppingplanner.domain.repository.ShoppingItemRepository
+import com.example.eventshoppingplanner.util.HallUtils
 import com.example.eventshoppingplanner.util.XlsxMapParser
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
@@ -29,7 +34,8 @@ data class MapUiState(
     val selectedMapName: String? = null,
     val currentMapData: DayMapData? = null,
     val items: List<ShoppingItem> = emptyList(),
-    val zoomLevel: ZoomLevel = ZoomLevel.ZOOM_100,
+    // ピンチズーム対応（連続的スケール）
+    val scale: Float = 1.0f,
     val offsetX: Float = 0f,
     val offsetY: Float = 0f,
     val errorMessage: String? = null,
@@ -41,8 +47,46 @@ data class MapUiState(
     val selectedCells: List<Pair<Int, Int>> = emptyList(),
     val currentSelectionType: CellSelectionType? = null,
     // セル選択中に保持する編集状態
-    val pendingEditState: BlockEditState? = null
+    val pendingEditState: BlockEditState? = null,
+    // ホール定義関連
+    val halls: List<HallDefinition> = emptyList(),
+    val selectedHallId: String? = null,  // null = "all"（全ホール表示）
+    val isHallDefinitionPanelOpen: Boolean = false,
+    val isHallDefinitionPanelVisible: Boolean = false,
+    // マーカーによる頂点選択モード
+    val hallVertexSelectionMode: HallVertexSelectionMode = HallVertexSelectionMode.NONE,
+    val hallMarkers: List<HallMarker> = emptyList(),  // マーカーリスト
+    val draggingMarkerId: String? = null,  // ドラッグ中のマーカーID
+    val selectedHallVertices: List<Vertex> = emptyList(),  // 確定済み頂点（後方互換用）
+    val editingHallId: String? = null,  // 編集中のホールID（新規はnull）
+    val pendingHallEditState: HallEditState? = null  // 頂点選択中に保持する編集状態
 )
+
+/**
+ * ホール定義用マーカー
+ */
+data class HallMarker(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val row: Int,
+    val col: Int
+)
+
+/**
+ * ホール編集状態（頂点選択中に保持）
+ */
+data class HallEditState(
+    val editingHall: HallDefinition?,
+    val isAddingNew: Boolean,
+    val currentHalls: List<HallDefinition>
+)
+
+/**
+ * ホール頂点選択モード
+ */
+enum class HallVertexSelectionMode {
+    NONE,
+    SELECTING
+}
 
 /**
  * ブロック編集状態（セル選択中に保持）
@@ -72,7 +116,8 @@ class MapViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val eventRepository: EventRepository,
     private val itemRepository: ShoppingItemRepository,
-    private val mapDataRepository: MapDataRepository
+    private val mapDataRepository: MapDataRepository,
+    private val hallDefinitionDao: HallDefinitionDao
 ) : ViewModel() {
 
     private val eventId: String = savedStateHandle.get<String>("eventId") ?: ""
@@ -123,6 +168,8 @@ class MapViewModel @Inject constructor(
                         )
                     }
                     updateCellItemsMap()
+                    // ホール定義を読み込み
+                    loadHallsForCurrentMap()
                 } else {
                     Log.d("MapViewModel", "loadSavedMapData: no saved map data found")
                     _uiState.update { it.copy(isLoading = false) }
@@ -230,27 +277,32 @@ class MapViewModel @Inject constructor(
                 selectedMapName = mapName,
                 currentMapData = mapData,
                 offsetX = 0f,
-                offsetY = 0f
+                offsetY = 0f,
+                // ホール関連をリセット
+                selectedHallId = null,
+                halls = emptyList()
             )
         }
         updateCellItemsMap()
+        // ホール定義を読み込み
+        loadHallsForCurrentMap()
     }
 
-    fun setZoomLevel(level: ZoomLevel) {
-        _uiState.update { it.copy(zoomLevel = level) }
-    }
-
-    fun zoomIn() {
-        val currentIndex = ZoomLevel.entries.indexOf(_uiState.value.zoomLevel)
-        if (currentIndex < ZoomLevel.entries.size - 1) {
-            _uiState.update { it.copy(zoomLevel = ZoomLevel.entries[currentIndex + 1]) }
-        }
-    }
-
-    fun zoomOut() {
-        val currentIndex = ZoomLevel.entries.indexOf(_uiState.value.zoomLevel)
-        if (currentIndex > 0) {
-            _uiState.update { it.copy(zoomLevel = ZoomLevel.entries[currentIndex - 1]) }
+    /**
+     * ピンチズームによるスケールとオフセットの更新
+     * @param newScale 新しいスケール値
+     * @param newOffsetX 新しいX方向オフセット
+     * @param newOffsetY 新しいY方向オフセット
+     */
+    fun updateScaleAndOffset(newScale: Float, newOffsetX: Float, newOffsetY: Float) {
+        // スケールの範囲制限（0.1〜5.0）
+        val clampedScale = newScale.coerceIn(0.1f, 5.0f)
+        _uiState.update {
+            it.copy(
+                scale = clampedScale,
+                offsetX = newOffsetX,
+                offsetY = newOffsetY
+            )
         }
     }
 
@@ -265,6 +317,54 @@ class MapViewModel @Inject constructor(
 
     fun setOffset(x: Float, y: Float) {
         _uiState.update { it.copy(offsetX = x, offsetY = y) }
+    }
+
+    // ===== マーカー関連 =====
+
+    /**
+     * マーカーを追加（画面中央に対応するセルに配置）
+     */
+    fun addHallMarker(centerRow: Int, centerCol: Int) {
+        val markers = _uiState.value.hallMarkers
+        if (markers.size >= 6) return  // 最大6個まで
+
+        val newMarker = HallMarker(
+            row = centerRow,
+            col = centerCol
+        )
+        _uiState.update { it.copy(hallMarkers = markers + newMarker) }
+    }
+
+    /**
+     * マーカーを削除
+     */
+    fun removeHallMarker(markerId: String) {
+        val markers = _uiState.value.hallMarkers.filter { it.id != markerId }
+        _uiState.update { it.copy(hallMarkers = markers) }
+    }
+
+    /**
+     * マーカーの位置を更新
+     */
+    fun updateHallMarkerPosition(markerId: String, row: Int, col: Int) {
+        val markers = _uiState.value.hallMarkers.map { marker ->
+            if (marker.id == markerId) marker.copy(row = row, col = col) else marker
+        }
+        _uiState.update { it.copy(hallMarkers = markers) }
+    }
+
+    /**
+     * ドラッグ中のマーカーIDを設定
+     */
+    fun setDraggingMarker(markerId: String?) {
+        _uiState.update { it.copy(draggingMarkerId = markerId) }
+    }
+
+    /**
+     * マーカーから頂点リストを生成
+     */
+    private fun markersToVertices(): List<Vertex> {
+        return _uiState.value.hallMarkers.map { Vertex(it.row, it.col) }
     }
 
     fun clearError() {
@@ -494,5 +594,245 @@ class MapViewModel @Inject constructor(
 
     fun deleteAllBlocks() {
         updateBlocks(emptyList())
+    }
+
+    // ===== ホール定義関連 =====
+
+    private val gson = Gson()
+
+    /**
+     * 現在のマップのホール定義をDBから読み込む
+     */
+    fun loadHallsForCurrentMap() {
+        val mapDataId = _uiState.value.currentMapData?.id ?: return
+
+        viewModelScope.launch {
+            try {
+                hallDefinitionDao.getHallsByMapDataId(mapDataId).collect { entities ->
+                    val halls = entities.map { entity ->
+                        val verticesType = object : TypeToken<List<Vertex>>() {}.type
+                        val vertices: List<Vertex> = gson.fromJson(entity.verticesJson, verticesType)
+                        HallDefinition(
+                            id = entity.id,
+                            name = entity.name,
+                            vertices = vertices,
+                            color = entity.color
+                        )
+                    }
+                    _uiState.update { it.copy(halls = halls) }
+                }
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "Failed to load halls", e)
+            }
+        }
+    }
+
+    /**
+     * ホール定義パネルを開く
+     */
+    fun openHallDefinitionPanel() {
+        _uiState.update {
+            it.copy(
+                isHallDefinitionPanelOpen = true,
+                isHallDefinitionPanelVisible = true
+            )
+        }
+    }
+
+    /**
+     * ホール定義パネルを閉じる
+     */
+    fun closeHallDefinitionPanel() {
+        _uiState.update {
+            it.copy(
+                isHallDefinitionPanelOpen = false,
+                isHallDefinitionPanelVisible = false,
+                hallVertexSelectionMode = HallVertexSelectionMode.NONE,
+                selectedHallVertices = emptyList(),
+                editingHallId = null,
+                pendingHallEditState = null
+            )
+        }
+    }
+
+    /**
+     * ホール定義パネルを表示（頂点選択後に戻る用）
+     */
+    fun showHallDefinitionPanel() {
+        _uiState.update {
+            it.copy(isHallDefinitionPanelVisible = true)
+        }
+    }
+
+    /**
+     * ホール選択（表示切替）
+     */
+    fun selectHall(hallId: String?) {
+        _uiState.update { it.copy(selectedHallId = hallId) }
+    }
+
+    /**
+     * ホール頂点選択モードを開始（マーカーシステム）
+     */
+    fun startHallVertexSelection(editingHallId: String? = null, editState: HallEditState? = null) {
+        // 既存の頂点があればマーカーとして復元
+        val existingVertices = editState?.editingHall?.vertices ?: emptyList()
+        val initialMarkers = existingVertices.map { vertex ->
+            HallMarker(row = vertex.row, col = vertex.col)
+        }
+
+        _uiState.update {
+            it.copy(
+                hallVertexSelectionMode = HallVertexSelectionMode.SELECTING,
+                hallMarkers = initialMarkers,
+                draggingMarkerId = null,
+                selectedHallVertices = emptyList(),
+                editingHallId = editingHallId,
+                isHallDefinitionPanelVisible = false,
+                pendingHallEditState = editState
+            )
+        }
+    }
+
+    /**
+     * ホール頂点を追加（後方互換用）
+     */
+    fun addHallVertex(row: Int, col: Int) {
+        val currentVertices = _uiState.value.selectedHallVertices
+
+        // 同じ頂点が既に選択されている場合は削除
+        val existingIndex = currentVertices.indexOfFirst { it.row == row && it.col == col }
+        if (existingIndex >= 0) {
+            _uiState.update {
+                it.copy(selectedHallVertices = currentVertices.filterIndexed { index, _ -> index != existingIndex })
+            }
+            return
+        }
+
+        // 6個まで追加可能
+        if (currentVertices.size >= 6) return
+
+        val newVertex = Vertex(row, col)
+        _uiState.update { it.copy(selectedHallVertices = currentVertices + newVertex) }
+    }
+
+    /**
+     * 直前のホール頂点を削除（後方互換用）
+     */
+    fun removeLastHallVertex() {
+        val currentVertices = _uiState.value.selectedHallVertices
+        if (currentVertices.isNotEmpty()) {
+            _uiState.update { it.copy(selectedHallVertices = currentVertices.dropLast(1)) }
+        }
+    }
+
+    /**
+     * ホール頂点選択を確定（マーカーから頂点を生成）
+     */
+    fun confirmHallVertexSelection(): List<Vertex> {
+        val markers = _uiState.value.hallMarkers
+        val vertices = markers.map { Vertex(it.row, it.col) }
+        val sortedVertices = HallUtils.computeConvexHull(vertices)
+
+        _uiState.update {
+            it.copy(
+                hallVertexSelectionMode = HallVertexSelectionMode.NONE,
+                hallMarkers = emptyList(),
+                draggingMarkerId = null,
+                // ソート済み頂点を保持（HallDefinitionPanelで使用）
+                selectedHallVertices = sortedVertices,
+                isHallDefinitionPanelVisible = true
+            )
+        }
+
+        return sortedVertices
+    }
+
+    /**
+     * ホール頂点選択をキャンセル
+     */
+    fun cancelHallVertexSelection() {
+        _uiState.update {
+            it.copy(
+                hallVertexSelectionMode = HallVertexSelectionMode.NONE,
+                hallMarkers = emptyList(),
+                draggingMarkerId = null,
+                selectedHallVertices = emptyList(),
+                editingHallId = null,
+                isHallDefinitionPanelVisible = true
+            )
+        }
+    }
+
+    /**
+     * ホール定義をDBに保存
+     */
+    fun saveHalls(halls: List<HallDefinition>) {
+        val mapDataId = _uiState.value.currentMapData?.id ?: return
+
+        viewModelScope.launch {
+            try {
+                // 既存のホールを削除
+                hallDefinitionDao.deleteHallsByMapDataId(mapDataId)
+
+                // 新しいホールを保存
+                val entities = halls.map { hall ->
+                    HallDefinitionEntity(
+                        id = hall.id,
+                        mapDataId = mapDataId,
+                        name = hall.name,
+                        verticesJson = gson.toJson(hall.vertices),
+                        color = hall.color
+                    )
+                }
+                hallDefinitionDao.insertHalls(entities)
+
+                _uiState.update { it.copy(halls = halls) }
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "Failed to save halls", e)
+            }
+        }
+    }
+
+    /**
+     * ホール定義を追加
+     */
+    fun addHall(hall: HallDefinition) {
+        val currentHalls = _uiState.value.halls
+        saveHalls(currentHalls + hall)
+    }
+
+    /**
+     * ホール定義を更新
+     */
+    fun updateHall(updatedHall: HallDefinition) {
+        val currentHalls = _uiState.value.halls
+        val newHalls = currentHalls.map {
+            if (it.id == updatedHall.id) updatedHall else it
+        }
+        saveHalls(newHalls)
+    }
+
+    /**
+     * ホール定義を削除
+     */
+    fun deleteHall(hallId: String) {
+        val currentHalls = _uiState.value.halls
+        val newHalls = currentHalls.filter { it.id != hallId }
+        saveHalls(newHalls)
+
+        // 削除したホールが選択されていた場合はリセット
+        if (_uiState.value.selectedHallId == hallId) {
+            _uiState.update { it.copy(selectedHallId = null) }
+        }
+    }
+
+    /**
+     * 保留中のホール編集状態を取得してクリア
+     */
+    fun consumePendingHallEditState(): HallEditState? {
+        val state = _uiState.value.pendingHallEditState
+        _uiState.update { it.copy(pendingHallEditState = null) }
+        return state
     }
 }

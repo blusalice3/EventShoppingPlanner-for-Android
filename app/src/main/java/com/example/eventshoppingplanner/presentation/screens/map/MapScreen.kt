@@ -8,6 +8,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,11 +19,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.Remove
-import androidx.compose.material.icons.filled.ZoomIn
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,6 +39,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -144,6 +146,24 @@ fun MapScreen(
         )
     }
 
+    // ホール定義パネル
+    if (uiState.isHallDefinitionPanelVisible) {
+        uiState.currentMapData?.let { mapData ->
+            HallDefinitionPanel(
+                mapData = mapData,
+                halls = uiState.halls,
+                pendingEditState = uiState.pendingHallEditState,
+                pendingVertices = uiState.selectedHallVertices,
+                onDismiss = { viewModel.closeHallDefinitionPanel() },
+                onSaveHalls = { halls -> viewModel.saveHalls(halls) },
+                onStartVertexSelection = { editingHallId, editState ->
+                    viewModel.startHallVertexSelection(editingHallId, editState)
+                },
+                onConsumePendingEditState = { viewModel.consumePendingHallEditState() }
+            )
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -160,6 +180,12 @@ fun MapScreen(
                             onClick = { viewModel.openBlockDefinitionPanel() }
                         ) {
                             Icon(Icons.Default.GridOn, "ブロック定義")
+                        }
+                        // ホール定義ボタン
+                        IconButton(
+                            onClick = { viewModel.openHallDefinitionPanel() }
+                        ) {
+                            Icon(Icons.Default.Crop, "ホール定義")
                         }
                     }
                     IconButton(
@@ -205,6 +231,18 @@ fun MapScreen(
                         )
                     }
 
+                    // ホール選択ドロップダウン（ホールが定義されている場合のみ表示）
+                    if (uiState.halls.isNotEmpty()) {
+                        HallSelector(
+                            halls = uiState.halls,
+                            selectedHallId = uiState.selectedHallId,
+                            onSelectHall = { viewModel.selectHall(it) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                    }
+
                     // マップキャンバス
                     Box(
                         modifier = Modifier
@@ -214,14 +252,22 @@ fun MapScreen(
                         uiState.currentMapData?.let { mapData ->
                             MapCanvas(
                                 mapData = mapData,
-                                zoomLevel = uiState.zoomLevel,
+                                scale = uiState.scale,
                                 offsetX = uiState.offsetX,
                                 offsetY = uiState.offsetY,
                                 cellItemsMap = uiState.cellItemsMap,
                                 selectedCells = uiState.selectedCells,
                                 isSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
                                 currentSelectionType = uiState.currentSelectionType,
+                                halls = uiState.halls,
+                                selectedHallId = uiState.selectedHallId,
+                                hallMarkers = uiState.hallMarkers,
+                                draggingMarkerId = uiState.draggingMarkerId,
+                                isHallVertexSelectionMode = uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING,
                                 onPan = { dx, dy -> viewModel.pan(dx, dy) },
+                                onPinchZoom = { newScale, newOffsetX, newOffsetY ->
+                                    viewModel.updateScaleAndOffset(newScale, newOffsetX, newOffsetY)
+                                },
                                 onCellTap = { row, col, items ->
                                     // セル選択モード中は選択に使用
                                     if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
@@ -267,6 +313,15 @@ fun MapScreen(
                                 onSelectedCellTap = { row, col ->
                                     // 選択済みセルをタップしたら選択解除
                                     viewModel.removeSelectedCell(row, col)
+                                },
+                                onMarkerDragStart = { markerId ->
+                                    viewModel.setDraggingMarker(markerId)
+                                },
+                                onMarkerDrag = { markerId, row, col ->
+                                    viewModel.updateHallMarkerPosition(markerId, row, col)
+                                },
+                                onMarkerDragEnd = {
+                                    viewModel.setDraggingMarker(null)
                                 }
                             )
                         }
@@ -296,15 +351,33 @@ fun MapScreen(
                             )
                         }
 
-                        // ズームコントロール
-                        ZoomControls(
-                            zoomLevel = uiState.zoomLevel,
-                            onZoomIn = { viewModel.zoomIn() },
-                            onZoomOut = { viewModel.zoomOut() },
-                            modifier = Modifier
-                                .align(Alignment.BottomEnd)
-                                .padding(16.dp)
-                        )
+                        // ホールマーカー選択モード中のオーバーレイ
+                        if (uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING) {
+                            HallMarkerSelectionOverlay(
+                                markers = uiState.hallMarkers,
+                                mapData = mapData,
+                                scale = uiState.scale,
+                                offsetX = uiState.offsetX,
+                                offsetY = uiState.offsetY,
+                                onAddMarker = { row, col ->
+                                    viewModel.addHallMarker(row, col)
+                                },
+                                onRemoveMarker = { markerId ->
+                                    viewModel.removeHallMarker(markerId)
+                                },
+                                onMarkerDrag = { markerId, row, col ->
+                                    viewModel.updateHallMarkerPosition(markerId, row, col)
+                                },
+                                onConfirm = {
+                                    viewModel.confirmHallVertexSelection()
+                                    viewModel.showHallDefinitionPanel()
+                                },
+                                onCancel = {
+                                    viewModel.cancelHallVertexSelection()
+                                    viewModel.showHallDefinitionPanel()
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -351,32 +424,47 @@ private fun MapTabs(
 @Composable
 private fun MapCanvas(
     mapData: DayMapData,
-    zoomLevel: ZoomLevel,
+    scale: Float,
     offsetX: Float,
     offsetY: Float,
     cellItemsMap: Map<String, List<ShoppingItem>>,
     selectedCells: List<Pair<Int, Int>> = emptyList(),
     isSelectionMode: Boolean = false,
     currentSelectionType: CellSelectionType? = null,
+    halls: List<HallDefinition> = emptyList(),
+    selectedHallId: String? = null,
+    // マーカーシステム
+    hallMarkers: List<HallMarker> = emptyList(),
+    draggingMarkerId: String? = null,
+    isHallVertexSelectionMode: Boolean = false,
     onPan: (Float, Float) -> Unit,
+    onPinchZoom: (Float, Float, Float) -> Unit,  // newScale, newOffsetX, newOffsetY
     onCellTap: (Int, Int, List<ShoppingItem>) -> Unit = { _, _, _ -> },
-    onSelectedCellTap: (Int, Int) -> Unit = { _, _ -> }  // 選択済みセルタップ時のコールバック
+    onSelectedCellTap: (Int, Int) -> Unit = { _, _ -> },
+    // マーカー操作
+    onMarkerDragStart: (String) -> Unit = {},
+    onMarkerDrag: (String, Int, Int) -> Unit = { _, _, _ -> },
+    onMarkerDragEnd: () -> Unit = {}
 ) {
     val density = LocalDensity.current
-    val scale = zoomLevel.scale
 
     // ジェスチャー完了を示すバージョン（パン/ズーム終了時にインクリメント）
     // これをpointerInputのkeyに使用し、操作完了後に座標系を更新
     var gestureVersion by remember { mutableStateOf(0) }
 
-    // ズームレベル変更時にgestureVersionを更新
-    LaunchedEffect(zoomLevel) {
+    // スケール変更時にgestureVersionを更新
+    LaunchedEffect(scale) {
         gestureVersion++
     }
 
     // 選択済みセルのセット
     val selectedCellsSet = remember(selectedCells) {
         selectedCells.map { "${it.first}-${it.second}" }.toSet()
+    }
+
+    // マーカー位置のセット（ドラッグ中のハイライト用）
+    val markerCellsSet = remember(hallMarkers) {
+        hallMarkers.map { "${it.row}-${it.col}" }.toSet()
     }
 
     // 4角選択の場合の範囲を計算
@@ -422,12 +510,27 @@ private fun MapCanvas(
     val colorSelected = Color(0xFF2196F3)  // 選択セルの色
     val colorSelectionArea = Color(0xFF2196F3).copy(alpha = 0.15f)  // 選択範囲の塗りつぶし色
 
-    // タップ位置からセル座標を計算する関数
+    // 現在のスケールとオフセットをローカルで保持（ピンチ操作中の計算用）
+    var localScale by remember { mutableStateOf(scale) }
+    var localOffsetX by remember { mutableStateOf(offsetX) }
+    var localOffsetY by remember { mutableStateOf(offsetY) }
+
+    // 外部から渡されたスケール/オフセットが変わった時に同期
+    LaunchedEffect(scale, offsetX, offsetY) {
+        localScale = scale
+        localOffsetX = offsetX
+        localOffsetY = offsetY
+    }
+
+    // ドラッグ中のセル（ハイライト用）
+    var highlightedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    // タップ位置からセル座標を計算する関数（ローカル値を参照）
     fun findCellAtPosition(tapX: Float, tapY: Float): Pair<Int, Int>? {
-        var currentX = offsetX
+        var currentX = localOffsetX
         var foundCol = -1
         for (col in 1..mapData.maxCol) {
-            val colWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+            val colWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * localScale
             if (tapX >= currentX && tapX < currentX + colWidth) {
                 foundCol = col
                 break
@@ -435,10 +538,10 @@ private fun MapCanvas(
             currentX += colWidth
         }
 
-        var currentY = offsetY
+        var currentY = localOffsetY
         var foundRow = -1
         for (row in 1..mapData.maxRow) {
-            val rowHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+            val rowHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * localScale
             if (tapY >= currentY && tapY < currentY + rowHeight) {
                 foundRow = row
                 break
@@ -457,68 +560,55 @@ private fun MapCanvas(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
-                // gestureVersionをkeyに追加：パン/ズーム完了後にpointerInputが再生成される
-                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion) {
-                    awaitPointerEventScope {
-                        while (true) {
-                            val event = awaitPointerEvent()
-                            val change = event.changes.firstOrNull() ?: continue
+                // ピンチズームとパン処理
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, isHallVertexSelectionMode) {
+                    detectTransformGestures(
+                        panZoomLock = false
+                    ) { centroid, pan, zoom, _ ->
+                        if (zoom != 1f) {
+                            // ピンチズーム処理
+                            val newScale = (localScale * zoom).coerceIn(0.1f, 5.0f)
 
-                            if (change.pressed) {
-                                val startPosition = change.position
-                                val startTime = System.currentTimeMillis()
-                                var totalDrag = Offset.Zero
-                                var wasDragging = false
+                            // ピンチの中心点を基準にズーム
+                            // 中心点がスケール前後で同じ位置に留まるようにオフセットを調整
+                            val scaleChange = newScale / localScale
+                            val newOffsetX = centroid.x - (centroid.x - localOffsetX) * scaleChange
+                            val newOffsetY = centroid.y - (centroid.y - localOffsetY) * scaleChange
 
-                                // ポインタが離されるまで追跡
-                                while (change.pressed) {
-                                    val nextEvent = awaitPointerEvent()
-                                    val nextChange = nextEvent.changes.firstOrNull() ?: break
+                            localScale = newScale
+                            localOffsetX = newOffsetX
+                            localOffsetY = newOffsetY
 
-                                    if (nextChange.pressed) {
-                                        val dragAmount = nextChange.position - nextChange.previousPosition
-                                        totalDrag += dragAmount
+                            // ViewModelに即時反映
+                            onPinchZoom(localScale, localOffsetX, localOffsetY)
+                        } else if (!isHallVertexSelectionMode && (pan.x != 0f || pan.y != 0f)) {
+                            // パン処理（マーカーモード中以外）
+                            localOffsetX += pan.x
+                            localOffsetY += pan.y
+                            onPan(pan.x, pan.y)
+                        }
+                    }
+                }
+                // タップ処理（別のpointerInputで処理）
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, isHallVertexSelectionMode) {
+                    detectTapGestures { position ->
+                        // マーカーモード中はタップ処理しない
+                        if (isHallVertexSelectionMode) return@detectTapGestures
 
-                                        // ドラッグ閾値を超えたらパン処理
-                                        if (totalDrag.getDistance() > 10f) {
-                                            wasDragging = true
-                                            onPan(dragAmount.x, dragAmount.y)
-                                            nextChange.consume()
-                                        }
-                                    } else {
-                                        // ポインタが離された
-                                        val endTime = System.currentTimeMillis()
-                                        val duration = endTime - startTime
+                        val cellPos = findCellAtPosition(position.x, position.y)
+                        cellPos?.let { (row, col) ->
+                            // 結合セルの場合は開始セルを使用
+                            val mergedInfo = mergeMap["$row-$col"]
+                            val actualRow = mergedInfo?.startRow ?: row
+                            val actualCol = mergedInfo?.startCol ?: col
+                            val key = "$actualRow-$actualCol"
 
-                                        // 短いタップで移動量が少ない場合はタップとして処理
-                                        if (duration < 300 && totalDrag.getDistance() < 20f) {
-                                            val cellPos = findCellAtPosition(startPosition.x, startPosition.y)
-                                            cellPos?.let { (row, col) ->
-                                                // 結合セルの場合は開始セルを使用
-                                                val mergedInfo = mergeMap["$row-$col"]
-                                                val actualRow = mergedInfo?.startRow ?: row
-                                                val actualCol = mergedInfo?.startCol ?: col
-                                                val key = "$actualRow-$actualCol"
-
-                                                // セル選択モード中で、既に選択済みのセルをタップした場合は選択解除
-                                                if (isSelectionMode && selectedCellsSet.contains(key)) {
-                                                    onSelectedCellTap(actualRow, actualCol)
-                                                } else {
-                                                    val items = cellItemsMap[key] ?: emptyList()
-                                                    onCellTap(actualRow, actualCol, items)
-                                                }
-                                            }
-                                        }
-                                        nextChange.consume()
-                                        break
-                                    }
-                                }
-
-                                // パン操作が終了した場合、gestureVersionをインクリメント
-                                // これにより次のタップで最新の座標系が使われる
-                                if (wasDragging) {
-                                    gestureVersion++
-                                }
+                            // セル選択モード中で、既に選択済みのセルをタップした場合は選択解除
+                            if (isSelectionMode && selectedCellsSet.contains(key)) {
+                                onSelectedCellTap(actualRow, actualCol)
+                            } else {
+                                val items = cellItemsMap[key] ?: emptyList()
+                                onCellTap(actualRow, actualCol, items)
                             }
                         }
                     }
@@ -527,16 +617,17 @@ private fun MapCanvas(
             val canvasWidth = size.width
             val canvasHeight = size.height
 
-            // 描画開始位置
-            val startX = offsetX
-            val startY = offsetY
+            // 描画開始位置（ローカル値を使用）
+            val startX = localOffsetX
+            val startY = localOffsetY
+            val drawScale = localScale
 
             // 各セルの位置を計算するためのヘルパー関数
             fun getColumnX(col: Int): Float {
                 var x = startX
                 for (c in 1 until col) {
                     val width = mapData.columnWidths[c] ?: mapData.defaultColumnWidth
-                    x += width * scale
+                    x += width * drawScale
                 }
                 return x
             }
@@ -545,17 +636,17 @@ private fun MapCanvas(
                 var y = startY
                 for (r in 1 until row) {
                     val height = mapData.rowHeights[r] ?: mapData.defaultRowHeight
-                    y += height * scale
+                    y += height * drawScale
                 }
                 return y
             }
 
             fun getColumnWidth(col: Int): Float {
-                return (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+                return (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * drawScale
             }
 
             fun getRowHeight(row: Int): Float {
-                return (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+                return (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * drawScale
             }
 
             // 描画範囲を計算
@@ -855,10 +946,10 @@ private fun MapCanvas(
 
                 // 範囲の幅と高さを計算
                 for (c in bounds.minCol..bounds.maxCol) {
-                    areaEndX += (mapData.columnWidths[c] ?: mapData.defaultColumnWidth) * scale
+                    areaEndX += (mapData.columnWidths[c] ?: mapData.defaultColumnWidth) * drawScale
                 }
                 for (r in bounds.minRow..bounds.maxRow) {
-                    areaEndY += (mapData.rowHeights[r] ?: mapData.defaultRowHeight) * scale
+                    areaEndY += (mapData.rowHeights[r] ?: mapData.defaultRowHeight) * drawScale
                 }
 
                 val areaWidth = areaEndX - areaStartX
@@ -878,6 +969,73 @@ private fun MapCanvas(
                     size = Size(areaWidth, areaHeight),
                     style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4f)
                 )
+            }
+
+            // ホール範囲を描画
+            halls.forEach { hall ->
+                if (hall.vertices.size >= 3) {
+                    val hallColor = Color(hall.color).copy(alpha = 0.3f)
+                    val path = androidx.compose.ui.graphics.Path()
+
+                    hall.vertices.forEachIndexed { index, vertex ->
+                        val x = getColumnX(vertex.col) + getColumnWidth(vertex.col) / 2
+                        val y = getRowY(vertex.row) + getRowHeight(vertex.row) / 2
+
+                        if (index == 0) {
+                            path.moveTo(x, y)
+                        } else {
+                            path.lineTo(x, y)
+                        }
+                    }
+                    path.close()
+
+                    // 塗りつぶし
+                    drawPath(path, hallColor)
+
+                    // 枠線
+                    drawPath(
+                        path,
+                        Color(hall.color),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                    )
+                }
+            }
+
+            // マーカーモード中の凸包プレビュー
+            if (isHallVertexSelectionMode && hallMarkers.size >= 3) {
+                // マーカーから頂点リストを生成
+                val markerVertices = hallMarkers.map { Vertex(it.row, it.col) }
+                val sortedVertices = com.example.eventshoppingplanner.util.HallUtils.computeConvexHull(markerVertices)
+
+                if (sortedVertices.size >= 3) {
+                    val previewPath = androidx.compose.ui.graphics.Path()
+                    sortedVertices.forEachIndexed { index, vertex ->
+                        val x = getColumnX(vertex.col) + getColumnWidth(vertex.col) / 2
+                        val y = getRowY(vertex.row) + getRowHeight(vertex.row) / 2
+
+                        if (index == 0) {
+                            previewPath.moveTo(x, y)
+                        } else {
+                            previewPath.lineTo(x, y)
+                        }
+                    }
+                    previewPath.close()
+
+                    // プレビュー塗りつぶし
+                    drawPath(previewPath, Color(0xFF2196F3).copy(alpha = 0.2f))
+
+                    // プレビュー枠線（破線風に点線で）
+                    drawPath(
+                        previewPath,
+                        Color(0xFF2196F3),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(
+                            width = 3f,
+                            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                                floatArrayOf(10f, 10f), 0f
+                            )
+                        )
+                    )
+                }
             }
         }
     }
@@ -962,30 +1120,242 @@ private fun getBorderStrokeWidth(weight: BorderWeight, scale: Float): Float {
     }.coerceAtLeast(0.5f)
 }
 
+/**
+ * ホールマーカー選択オーバーレイ
+ */
 @Composable
-private fun ZoomControls(
-    zoomLevel: ZoomLevel,
-    onZoomIn: () -> Unit,
-    onZoomOut: () -> Unit,
-    modifier: Modifier = Modifier
+private fun HallMarkerSelectionOverlay(
+    markers: List<HallMarker>,
+    mapData: DayMapData,
+    scale: Float,
+    offsetX: Float,
+    offsetY: Float,
+    onAddMarker: (Int, Int) -> Unit,
+    onRemoveMarker: (String) -> Unit,
+    onMarkerDrag: (String, Int, Int) -> Unit,
+    onConfirm: () -> Unit,
+    onCancel: () -> Unit
 ) {
-    Card(
-        modifier = modifier,
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(8.dp)
-        ) {
-            IconButton(onClick = onZoomIn) {
-                Icon(Icons.Default.Add, "拡大")
+    val density = LocalDensity.current
+    val markerOffsetDp = 80.dp  // マーカーの表示オフセット（タッチ位置より上）
+    val markerOffsetPx = with(density) { markerOffsetDp.toPx() }
+
+    // 各マーカーのドラッグ状態
+    var draggingMarkerId by remember { mutableStateOf<String?>(null) }
+    var dragOffset by remember { mutableStateOf(Offset.Zero) }
+
+    // 現在ドラッグ中のセル（ハイライト用）
+    var highlightedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    // セル位置を計算する関数
+    fun getCellPosition(row: Int, col: Int): Offset {
+        var x = offsetX
+        for (c in 1 until col) {
+            x += (mapData.columnWidths[c] ?: mapData.defaultColumnWidth) * scale
+        }
+        var y = offsetY
+        for (r in 1 until row) {
+            y += (mapData.rowHeights[r] ?: mapData.defaultRowHeight) * scale
+        }
+        val cellWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+        val cellHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+        return Offset(x + cellWidth / 2, y + cellHeight / 2)
+    }
+
+    // 画面座標からセル座標を計算
+    fun findCellAt(screenX: Float, screenY: Float): Pair<Int, Int>? {
+        var currentX = offsetX
+        var foundCol = -1
+        for (col in 1..mapData.maxCol) {
+            val colWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+            if (screenX >= currentX && screenX < currentX + colWidth) {
+                foundCol = col
+                break
             }
-            Text(
-                text = zoomLevel.displayName,
-                style = MaterialTheme.typography.bodySmall
-            )
-            IconButton(onClick = onZoomOut) {
-                Icon(Icons.Default.Remove, "縮小")
+            currentX += colWidth
+        }
+
+        var currentY = offsetY
+        var foundRow = -1
+        for (row in 1..mapData.maxRow) {
+            val rowHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+            if (screenY >= currentY && screenY < currentY + rowHeight) {
+                foundRow = row
+                break
+            }
+            currentY += rowHeight
+        }
+
+        return if (foundRow > 0 && foundCol > 0) Pair(foundRow, foundCol) else null
+    }
+
+    // 画面中央のセルを取得
+    fun getCenterCell(canvasWidth: Float, canvasHeight: Float): Pair<Int, Int> {
+        val centerX = canvasWidth / 2
+        val centerY = canvasHeight / 2
+        return findCellAt(centerX, centerY) ?: Pair(
+            mapData.maxRow / 2,
+            mapData.maxCol / 2
+        )
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // ドラッグ中のセルハイライト用Canvas
+        if (highlightedCell != null) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                highlightedCell?.let { (row, col) ->
+                    val cellPos = getCellPosition(row, col)
+                    val cellWidth = (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * scale
+                    val cellHeight = (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * scale
+
+                    drawRect(
+                        color = Color(0xFF2196F3).copy(alpha = 0.3f),
+                        topLeft = Offset(cellPos.x - cellWidth / 2, cellPos.y - cellHeight / 2),
+                        size = Size(cellWidth, cellHeight)
+                    )
+                    drawRect(
+                        color = Color(0xFF2196F3),
+                        topLeft = Offset(cellPos.x - cellWidth / 2, cellPos.y - cellHeight / 2),
+                        size = Size(cellWidth, cellHeight),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f)
+                    )
+                }
+            }
+        }
+
+        // マーカー表示
+        markers.forEach { marker ->
+            val cellPos = getCellPosition(marker.row, marker.col)
+            val isDragging = draggingMarkerId == marker.id
+
+            // マーカーの表示位置（ドラッグ中はドラッグオフセットを適用）
+            val displayX = if (isDragging) dragOffset.x else cellPos.x
+            val displayY = if (isDragging) dragOffset.y - markerOffsetPx else cellPos.y - markerOffsetPx
+
+            Box(
+                modifier = Modifier
+                    .offset {
+                        IntOffset(
+                            (displayX - 24.dp.toPx()).toInt(),
+                            (displayY - 48.dp.toPx()).toInt()
+                        )
+                    }
+                    .pointerInput(marker.id) {
+                        detectDragGestures(
+                            onDragStart = { offset ->
+                                draggingMarkerId = marker.id
+                                dragOffset = Offset(
+                                    cellPos.x + offset.x - size.width / 2,
+                                    cellPos.y + offset.y - size.height / 2 + markerOffsetPx
+                                )
+                            },
+                            onDrag = { change, dragAmount ->
+                                change.consume()
+                                dragOffset += dragAmount
+                                // ドラッグ位置のセルを計算（マーカーオフセットを考慮）
+                                val cellAt = findCellAt(dragOffset.x, dragOffset.y)
+                                highlightedCell = cellAt
+                            },
+                            onDragEnd = {
+                                // ドラッグ終了時にセルにスナップ
+                                highlightedCell?.let { (row, col) ->
+                                    onMarkerDrag(marker.id, row, col)
+                                }
+                                draggingMarkerId = null
+                                highlightedCell = null
+                            },
+                            onDragCancel = {
+                                draggingMarkerId = null
+                                highlightedCell = null
+                            }
+                        )
+                    }
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    // 削除ボタン
+                    IconButton(
+                        onClick = { onRemoveMarker(marker.id) },
+                        modifier = Modifier.size(24.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "削除",
+                            tint = Color.Red,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                    // マーカーアイコン
+                    Text(
+                        text = "🚩",
+                        fontSize = 32.sp,
+                        modifier = Modifier.offset(y = (-8).dp)
+                    )
+                }
+            }
+        }
+
+        // 下部コントロールパネル
+        Card(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(16.dp)
+                .fillMaxWidth(),
+            elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text(
+                    text = "📍 ホールの頂点を設定 (${markers.size}/4〜6)",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                Text(
+                    text = "🚩をドラッグして頂点を配置してください",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // マーカー追加ボタン
+                    OutlinedButton(
+                        onClick = {
+                            // 画面サイズを取得して中央のセルを計算
+                            // 実際の画面サイズが取得できないので、マップの中央付近を使用
+                            val centerRow = mapData.maxRow / 2
+                            val centerCol = mapData.maxCol / 2
+                            onAddMarker(centerRow, centerCol)
+                        },
+                        enabled = markers.size < 6
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("マーカー追加")
+                    }
+
+                    // 確定ボタン
+                    Button(
+                        onClick = onConfirm,
+                        enabled = markers.size >= 4
+                    ) {
+                        Text("確定")
+                    }
+
+                    // キャンセルボタン
+                    OutlinedButton(onClick = onCancel) {
+                        Text("キャンセル")
+                    }
+                }
             }
         }
     }
@@ -1615,4 +1985,85 @@ private fun AddItemFromMapDialog(
             }
         }
     )
+}
+
+/**
+ * ホール選択ドロップダウン
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun HallSelector(
+    halls: List<HallDefinition>,
+    selectedHallId: String?,
+    onSelectHall: (String?) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var expanded by remember { mutableStateOf(false) }
+
+    val selectedHall = halls.find { it.id == selectedHallId }
+    val displayText = selectedHall?.name ?: "全ホール"
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier
+    ) {
+        OutlinedTextField(
+            value = displayText,
+            onValueChange = {},
+            readOnly = true,
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(),
+            colors = OutlinedTextFieldDefaults.colors(),
+            leadingIcon = if (selectedHall != null) {
+                {
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .background(Color(selectedHall.color), shape = androidx.compose.foundation.shape.CircleShape)
+                    )
+                }
+            } else null
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false }
+        ) {
+            // 全ホールオプション
+            DropdownMenuItem(
+                text = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("● ", color = MaterialTheme.colorScheme.onSurface)
+                        Text("全ホール")
+                    }
+                },
+                onClick = {
+                    onSelectHall(null)
+                    expanded = false
+                }
+            )
+            // 各ホール
+            halls.forEach { hall ->
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .background(Color(hall.color), shape = androidx.compose.foundation.shape.CircleShape)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(hall.name)
+                        }
+                    },
+                    onClick = {
+                        onSelectHall(hall.id)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
 }

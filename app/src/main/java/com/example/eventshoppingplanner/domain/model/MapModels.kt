@@ -196,3 +196,23 @@ enum class ZoomLevel(val scale: Float, val displayName: String) {
     ZOOM_125(1.25f, "125%"),
     ZOOM_150(1.5f, "150%")
 }
+
+// ===== ホール定義関連 =====
+
+/**
+ * 頂点座標
+ */
+data class Vertex(
+    val row: Int,
+    val col: Int
+)
+
+/**
+ * ホール定義（多角形エリア）
+ */
+data class HallDefinition(
+    val id: String = java.util.UUID.randomUUID().toString(),
+    val name: String,
+    val vertices: List<Vertex>,  // 4〜6個の頂点（凸包計算後の順序）
+    val color: Long = 0xFFFFE0B2  // 表示色（ARGB）
+)
