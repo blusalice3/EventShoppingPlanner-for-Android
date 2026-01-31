@@ -535,11 +535,21 @@ fun MapScreen(
                 currentDayName = mapData.dayName,
                 displayMode = uiState.visitListDisplayMode,
                 panelWidth = uiState.visitListPanelWidth,
+                selectionMode = uiState.visitListSelectionMode,
+                rangeStart = uiState.visitListRangeStart,
+                rangeEnd = uiState.visitListRangeEnd,
                 onClose = { viewModel.closeVisitListPanel() },
                 onRemoveFromVisitList = { itemId -> viewModel.removeFromVisitList(itemId) },
                 onChangePriority = { itemId, priority -> viewModel.changeItemPriority(itemId, priority) },
                 onChangeDisplayMode = { mode -> viewModel.changeVisitListDisplayMode(mode) },
-                onChangePanelWidth = { width -> viewModel.changeVisitListPanelWidth(width) }
+                onChangePanelWidth = { width -> viewModel.changeVisitListPanelWidth(width) },
+                onMoveItem = { from, to -> viewModel.moveItemInVisitList(from, to) },
+                onMoveItemUp = { itemId -> viewModel.moveItemUp(itemId) },
+                onMoveItemDown = { itemId -> viewModel.moveItemDown(itemId) },
+                onSetSelectionMode = { mode -> viewModel.setVisitListSelectionMode(mode) },
+                onSetRangeStart = { itemId -> viewModel.setVisitListRangeStart(itemId) },
+                onSetRangeEnd = { itemId -> viewModel.setVisitListRangeEnd(itemId) },
+                onReverseRange = { viewModel.reverseVisitListRange() }
             )
         }
 
@@ -573,7 +583,7 @@ private fun MapCanvas(
     offsetX: Float,
     offsetY: Float,
     cellItemsMap: Map<String, List<ShoppingItem>>,
-    visitListItemIds: Set<String> = emptySet(),  // 訪問先リストに追加されたアイテムID
+    visitListItemIds: List<String> = emptyList(),  // 訪問先リストに追加されたアイテムID
     selectedCells: List<Pair<Int, Int>> = emptyList(),
     isSelectionMode: Boolean = false,
     currentSelectionType: CellSelectionType? = null,
@@ -1783,7 +1793,7 @@ private fun CellItemsDialog(
     blockName: String,
     number: Int,
     items: List<ShoppingItem>,
-    visitListItemIds: Set<String>,
+    visitListItemIds: List<String>,
     onDismiss: () -> Unit,
     onToggleVisitList: (String) -> Unit,
     onOpenUrl: (String) -> Unit,

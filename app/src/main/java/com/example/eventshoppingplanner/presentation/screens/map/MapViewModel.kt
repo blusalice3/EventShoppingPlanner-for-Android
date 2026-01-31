@@ -66,11 +66,14 @@ data class MapUiState(
     val editingHallId: String? = null,  // 編集中のホールID（新規はnull）
     val pendingHallEditState: HallEditState? = null,  // 頂点選択中に保持する編集状態
     // 訪問先リスト関連
-    val visitListItemIds: Set<String> = emptySet(),  // 訪問先リストに追加されたアイテムID
+    val visitListItemIds: List<String> = emptyList(),  // 訪問先リストに追加されたアイテムID（訪問順）
     val isVisitListPanelOpen: Boolean = false,  // 訪問先リストパネルの表示状態
     val visitListDisplayMode: VisitListDisplayMode = VisitListDisplayMode.SIDE_RIGHT,  // 表示モード
     val visitListPanelWidth: Float = 300f,  // パネル幅（dp）
-    val isRouteVisible: Boolean = true  // ルート表示のON/OFF
+    val isRouteVisible: Boolean = true,  // ルート表示のON/OFF
+    val visitListSelectionMode: VisitListSelectionMode = VisitListSelectionMode.NORMAL,  // 選択モード
+    val visitListRangeStart: String? = null,  // 範囲選択の開始アイテムID
+    val visitListRangeEnd: String? = null  // 範囲選択の終了アイテムID
 )
 
 /**
@@ -314,7 +317,7 @@ class MapViewModel @Inject constructor(
                 selectedHallId = null,
                 halls = emptyList(),
                 // 訪問先リストをリセット（すぐに読み込む）
-                visitListItemIds = emptySet()
+                visitListItemIds = emptyList()
             )
         }
         updateCellItemsMap()
@@ -337,12 +340,11 @@ class MapViewModel @Inject constructor(
         viewModelScope.launch {
             try {
                 val entity = visitListDao.getVisitListOnce(eventId, dayName)
-                val itemIds = if (entity != null) {
+                val itemIds: List<String> = if (entity != null) {
                     val type = object : TypeToken<List<String>>() {}.type
-                    val list: List<String> = gson.fromJson(entity.itemIdsJson, type)
-                    list.toSet()
+                    gson.fromJson(entity.itemIdsJson, type) ?: emptyList()
                 } else {
-                    emptySet()
+                    emptyList()
                 }
                 _uiState.update { it.copy(visitListItemIds = itemIds) }
                 Log.d("MapViewModel", "loadVisitListForCurrentMap: loaded ${itemIds.size} items for dayName=$dayName")
@@ -359,7 +361,7 @@ class MapViewModel @Inject constructor(
      */
     private fun saveVisitList() {
         val dayName = _uiState.value.currentMapData?.dayName ?: return
-        val itemIds = _uiState.value.visitListItemIds.toList()
+        val itemIds = _uiState.value.visitListItemIds
 
         viewModelScope.launch {
             try {
@@ -397,7 +399,7 @@ class MapViewModel @Inject constructor(
         val currentIds = _uiState.value.visitListItemIds
         if (!currentIds.contains(itemId)) return
 
-        _uiState.update { it.copy(visitListItemIds = currentIds - itemId) }
+        _uiState.update { it.copy(visitListItemIds = currentIds.filter { it != itemId }) }
         saveVisitList()
         updateHallItemCounts()
         Log.d("MapViewModel", "removeFromVisitList: removed itemId=$itemId")
@@ -464,6 +466,130 @@ class MapViewModel @Inject constructor(
     fun changeVisitListPanelWidth(width: Float) {
         _uiState.update { it.copy(visitListPanelWidth = width) }
     }
+
+    // ========== 訪問先リスト並び替え関連 ==========
+
+    /**
+     * 訪問先リスト内でアイテムを移動（ドラッグ＆ドロップ用）
+     * @param fromIndex 移動元インデックス
+     * @param toIndex 移動先インデックス
+     */
+    fun moveItemInVisitList(fromIndex: Int, toIndex: Int) {
+        val currentIds = _uiState.value.visitListItemIds.toMutableList()
+        if (fromIndex < 0 || fromIndex >= currentIds.size ||
+            toIndex < 0 || toIndex >= currentIds.size ||
+            fromIndex == toIndex) return
+
+        val item = currentIds.removeAt(fromIndex)
+        currentIds.add(toIndex, item)
+
+        _uiState.update { it.copy(visitListItemIds = currentIds) }
+        saveVisitList()
+        Log.d("MapViewModel", "moveItemInVisitList: from=$fromIndex to=$toIndex")
+    }
+
+    /**
+     * 訪問先リストでアイテムを上に移動
+     * @param itemId 移動するアイテムのID
+     */
+    fun moveItemUp(itemId: String) {
+        val currentIds = _uiState.value.visitListItemIds
+        val index = currentIds.indexOf(itemId)
+        if (index <= 0) return  // 既に先頭または見つからない
+
+        moveItemInVisitList(index, index - 1)
+    }
+
+    /**
+     * 訪問先リストでアイテムを下に移動
+     * @param itemId 移動するアイテムのID
+     */
+    fun moveItemDown(itemId: String) {
+        val currentIds = _uiState.value.visitListItemIds
+        val index = currentIds.indexOf(itemId)
+        if (index < 0 || index >= currentIds.size - 1) return  // 既に末尾または見つからない
+
+        moveItemInVisitList(index, index + 1)
+    }
+
+    /**
+     * 訪問先リストの選択モードを変更
+     */
+    fun setVisitListSelectionMode(mode: VisitListSelectionMode) {
+        _uiState.update {
+            it.copy(
+                visitListSelectionMode = mode,
+                visitListRangeStart = null,
+                visitListRangeEnd = null
+            )
+        }
+        Log.d("MapViewModel", "setVisitListSelectionMode: mode=$mode")
+    }
+
+    /**
+     * 範囲選択の開始点を設定
+     */
+    fun setVisitListRangeStart(itemId: String?) {
+        _uiState.update { it.copy(visitListRangeStart = itemId, visitListRangeEnd = null) }
+        Log.d("MapViewModel", "setVisitListRangeStart: itemId=$itemId")
+    }
+
+    /**
+     * 範囲選択の終了点を設定
+     */
+    fun setVisitListRangeEnd(itemId: String?) {
+        _uiState.update { it.copy(visitListRangeEnd = itemId) }
+        Log.d("MapViewModel", "setVisitListRangeEnd: itemId=$itemId")
+    }
+
+    /**
+     * 範囲選択をクリア
+     */
+    fun clearVisitListRange() {
+        _uiState.update {
+            it.copy(
+                visitListRangeStart = null,
+                visitListRangeEnd = null
+            )
+        }
+    }
+
+    /**
+     * 選択範囲の区間を反転
+     */
+    fun reverseVisitListRange() {
+        val startId = _uiState.value.visitListRangeStart ?: return
+        val endId = _uiState.value.visitListRangeEnd ?: return
+        val currentIds = _uiState.value.visitListItemIds.toMutableList()
+
+        val startIndex = currentIds.indexOf(startId)
+        val endIndex = currentIds.indexOf(endId)
+        if (startIndex < 0 || endIndex < 0) return
+
+        val actualStart = minOf(startIndex, endIndex)
+        val actualEnd = maxOf(startIndex, endIndex)
+
+        // 範囲を反転
+        val subList = currentIds.subList(actualStart, actualEnd + 1)
+        val reversed = subList.reversed()
+
+        for (i in reversed.indices) {
+            currentIds[actualStart + i] = reversed[i]
+        }
+
+        _uiState.update {
+            it.copy(
+                visitListItemIds = currentIds,
+                visitListRangeStart = null,
+                visitListRangeEnd = null,
+                visitListSelectionMode = VisitListSelectionMode.NORMAL
+            )
+        }
+        saveVisitList()
+        Log.d("MapViewModel", "reverseVisitListRange: reversed from $actualStart to $actualEnd")
+    }
+
+    // ========== 訪問先リスト並び替え関連 ここまで ==========
 
     /**
      * ピンチズームによるスケールとオフセットの更新
