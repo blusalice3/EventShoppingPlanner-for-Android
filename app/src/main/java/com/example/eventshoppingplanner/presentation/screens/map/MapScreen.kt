@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.OpenInNew
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -91,170 +92,141 @@ fun MapScreen(
         uri?.let { viewModel.importMapFile(it) }
     }
 
-    // セルアイテムダイアログ
-    selectedCellInfo?.let { cellInfo ->
-        CellItemsDialog(
-            blockName = cellInfo.blockName,
-            number = cellInfo.number,
-            items = cellInfo.items,
-            onDismiss = { selectedCellInfo = null },
-            onUpdateStatus = { itemId, status ->
-                viewModel.updateItemStatus(itemId, status)
-            },
-            onOpenUrl = { url ->
-                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))
-                context.startActivity(intent)
-            },
-            onAddNewItem = if (cellInfo.isInBlockDefinition) {
-                {
-                    // マップ名から参加日を抽出（例: "1日目マップ" -> "1日目"）
-                    val eventDate = uiState.selectedMapName?.replace("マップ", "") ?: ""
-                    newItemPreset = NewItemPreset(
-                        eventDate = eventDate,
-                        block = cellInfo.blockName,
-                        number = cellInfo.number.toString()
-                    )
-                    selectedCellInfo = null
-                    showAddItemDialog = true
-                }
-            } else null
-        )
-    }
+    // 全体をBoxでラップ（パネルのオーバーレイ表示用）
+    Box(modifier = Modifier.fillMaxSize()) {
 
-    // 新規アイテム追加ダイアログ
-    if (showAddItemDialog && newItemPreset != null) {
-        AddItemFromMapDialog(
-            preset = newItemPreset!!,
-            eventId = eventId,
-            onDismiss = {
-                showAddItemDialog = false
-                newItemPreset = null
-            },
-            onSave = { item ->
-                viewModel.addItem(item)
-                showAddItemDialog = false
-                newItemPreset = null
-            }
-        )
-    }
-
-    // ブロック定義パネル
-    uiState.currentMapData?.let { mapData ->
-        BlockDefinitionPanel(
-            isOpen = uiState.isBlockDefinitionPanelOpen,
-            isVisible = uiState.isBlockDefinitionPanelVisible,
-            onClose = { viewModel.closeBlockDefinitionPanel() },
-            mapData = mapData,
-            selectedCells = uiState.selectedCells,
-            onStartCellSelection = { selectionType, editState ->
-                viewModel.startCellSelection(selectionType, editState)
-            },
-            onCancelCellSelection = { viewModel.cancelCellSelection() },
-            onUpdateBlocks = { blocks -> viewModel.updateBlocks(blocks) },
-            isInSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
-            currentSelectionType = uiState.currentSelectionType,
-            pendingEditState = uiState.pendingEditState,
-            onClearPendingEditState = { viewModel.clearPendingEditState() }
-        )
-    }
-
-    // ホール定義パネル
-    if (uiState.isHallDefinitionPanelVisible) {
-        uiState.currentMapData?.let { mapData ->
-            HallDefinitionPanel(
-                mapData = mapData,
-                halls = uiState.halls,
-                pendingEditState = uiState.pendingHallEditState,
-                pendingVertices = uiState.selectedHallVertices,
-                onDismiss = { viewModel.closeHallDefinitionPanel() },
-                onSaveHalls = { halls -> viewModel.saveHalls(halls) },
-                onStartVertexSelection = { editingHallId, editState ->
-                    viewModel.startHallVertexSelection(editingHallId, editState)
+        // セルアイテムダイアログ
+        selectedCellInfo?.let { cellInfo ->
+            CellItemsDialog(
+                blockName = cellInfo.blockName,
+                number = cellInfo.number,
+                items = cellInfo.items,
+                visitListItemIds = uiState.visitListItemIds,
+                onDismiss = { selectedCellInfo = null },
+                onToggleVisitList = { itemId ->
+                    viewModel.toggleVisitListItem(itemId)
                 },
-                onConsumePendingEditState = { viewModel.consumePendingHallEditState() }
+                onOpenUrl = { url ->
+                    val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))
+                    context.startActivity(intent)
+                },
+                onAddNewItem = if (cellInfo.isInBlockDefinition) {
+                    {
+                        // マップ名から参加日を抽出（例: "1日目マップ" -> "1日目"）
+                        val eventDate = uiState.selectedMapName?.replace("マップ", "") ?: ""
+                        newItemPreset = NewItemPreset(
+                            eventDate = eventDate,
+                            block = cellInfo.blockName,
+                            number = cellInfo.number.toString()
+                        )
+                        selectedCellInfo = null
+                        showAddItemDialog = true
+                    }
+                } else null
             )
         }
-    }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(uiState.event?.name ?: "マップ") },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "戻る")
-                    }
+        // 新規アイテム追加ダイアログ
+        if (showAddItemDialog && newItemPreset != null) {
+            AddItemFromMapDialog(
+                preset = newItemPreset!!,
+                eventId = eventId,
+                onDismiss = {
+                    showAddItemDialog = false
+                    newItemPreset = null
                 },
-                actions = {
-                    // ホール選択アイコン（ホール定義がある場合のみ表示）
-                    if (uiState.currentMapData != null && uiState.halls.isNotEmpty()) {
-                        Box {
-                            IconButton(
-                                onClick = { viewModel.toggleHallSelector() }
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Map,
-                                    contentDescription = "ホール選択",
-                                    tint = if (uiState.selectedHallId != null) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        LocalContentColor.current
-                                    }
-                                )
-                            }
-                            // 選択中インジケーター
-                            if (uiState.selectedHallId != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .offset(x = (-4).dp, y = 4.dp)
-                                        .size(8.dp)
-                                        .background(
-                                            MaterialTheme.colorScheme.primary,
-                                            CircleShape
-                                        )
-                                )
-                            }
+                onSave = { item ->
+                    viewModel.addItem(item)
+                    showAddItemDialog = false
+                    newItemPreset = null
+                }
+            )
+        }
 
-                            // ドロップダウンメニュー
-                            DropdownMenu(
-                                expanded = uiState.isHallSelectorOpen,
-                                onDismissRequest = { viewModel.closeHallSelector() }
-                            ) {
-                                // 全ホール
-                                DropdownMenuItem(
-                                    text = {
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.SpaceBetween,
-                                            verticalAlignment = Alignment.CenterVertically
-                                        ) {
-                                            Text(
-                                                "全ホール",
-                                                fontWeight = if (uiState.selectedHallId == null) FontWeight.Bold else FontWeight.Normal
-                                            )
+        // ブロック定義パネル
+        uiState.currentMapData?.let { mapData ->
+            BlockDefinitionPanel(
+                isOpen = uiState.isBlockDefinitionPanelOpen,
+                isVisible = uiState.isBlockDefinitionPanelVisible,
+                onClose = { viewModel.closeBlockDefinitionPanel() },
+                mapData = mapData,
+                selectedCells = uiState.selectedCells,
+                onStartCellSelection = { selectionType, editState ->
+                    viewModel.startCellSelection(selectionType, editState)
+                },
+                onCancelCellSelection = { viewModel.cancelCellSelection() },
+                onUpdateBlocks = { blocks -> viewModel.updateBlocks(blocks) },
+                isInSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
+                currentSelectionType = uiState.currentSelectionType,
+                pendingEditState = uiState.pendingEditState,
+                onClearPendingEditState = { viewModel.clearPendingEditState() }
+            )
+        }
+
+        // ホール定義パネル
+        if (uiState.isHallDefinitionPanelVisible) {
+            uiState.currentMapData?.let { mapData ->
+                HallDefinitionPanel(
+                    mapData = mapData,
+                    halls = uiState.halls,
+                    pendingEditState = uiState.pendingHallEditState,
+                    pendingVertices = uiState.selectedHallVertices,
+                    onDismiss = { viewModel.closeHallDefinitionPanel() },
+                    onSaveHalls = { halls -> viewModel.saveHalls(halls) },
+                    onStartVertexSelection = { editingHallId, editState ->
+                        viewModel.startHallVertexSelection(editingHallId, editState)
+                    },
+                    onConsumePendingEditState = { viewModel.consumePendingHallEditState() }
+                )
+            }
+        }
+
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text(uiState.event?.name ?: "マップ") },
+                    navigationIcon = {
+                        IconButton(onClick = onNavigateBack) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, "戻る")
+                        }
+                    },
+                    actions = {
+                        // ホール選択アイコン（ホール定義がある場合のみ表示）
+                        if (uiState.currentMapData != null && uiState.halls.isNotEmpty()) {
+                            Box {
+                                IconButton(
+                                    onClick = { viewModel.toggleHallSelector() }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Map,
+                                        contentDescription = "ホール選択",
+                                        tint = if (uiState.selectedHallId != null) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            LocalContentColor.current
                                         }
-                                    },
-                                    onClick = { viewModel.selectHall(null) },
-                                    leadingIcon = {
-                                        if (uiState.selectedHallId == null) {
-                                            Icon(
-                                                Icons.Default.Check,
-                                                contentDescription = null,
-                                                tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                // 選択中インジケーター
+                                if (uiState.selectedHallId != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .offset(x = (-4).dp, y = 4.dp)
+                                            .size(8.dp)
+                                            .background(
+                                                MaterialTheme.colorScheme.primary,
+                                                CircleShape
                                             )
-                                        }
-                                    }
-                                )
+                                    )
+                                }
 
-                                HorizontalDivider()
-
-                                // 各ホール
-                                uiState.halls.forEach { hall ->
-                                    val itemCount = uiState.hallItemCounts[hall.id]
-                                    val executeCount = itemCount?.executeCount ?: 0
-                                    val totalCount = itemCount?.totalCount ?: 0
-
+                                // ドロップダウンメニュー
+                                DropdownMenu(
+                                    expanded = uiState.isHallSelectorOpen,
+                                    onDismissRequest = { viewModel.closeHallSelector() }
+                                ) {
+                                    // 全ホール
                                     DropdownMenuItem(
                                         text = {
                                             Row(
@@ -262,34 +234,15 @@ fun MapScreen(
                                                 horizontalArrangement = Arrangement.SpaceBetween,
                                                 verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                Row(
-                                                    verticalAlignment = Alignment.CenterVertically
-                                                ) {
-                                                    // ホール色インジケーター
-                                                    Box(
-                                                        modifier = Modifier
-                                                            .size(12.dp)
-                                                            .background(
-                                                                Color(hall.color),
-                                                                CircleShape
-                                                            )
-                                                    )
-                                                    Spacer(modifier = Modifier.width(8.dp))
-                                                    Text(
-                                                        hall.name,
-                                                        fontWeight = if (uiState.selectedHallId == hall.id) FontWeight.Bold else FontWeight.Normal
-                                                    )
-                                                }
                                                 Text(
-                                                    "(${executeCount}/${totalCount}件)",
-                                                    style = MaterialTheme.typography.bodySmall,
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    "全ホール",
+                                                    fontWeight = if (uiState.selectedHallId == null) FontWeight.Bold else FontWeight.Normal
                                                 )
                                             }
                                         },
-                                        onClick = { viewModel.selectHall(hall.id) },
+                                        onClick = { viewModel.selectHall(null) },
                                         leadingIcon = {
-                                            if (uiState.selectedHallId == hall.id) {
+                                            if (uiState.selectedHallId == null) {
                                                 Icon(
                                                     Icons.Default.Check,
                                                     contentDescription = null,
@@ -298,217 +251,299 @@ fun MapScreen(
                                             }
                                         }
                                     )
+
+                                    HorizontalDivider()
+
+                                    // 各ホール
+                                    uiState.halls.forEach { hall ->
+                                        val itemCount = uiState.hallItemCounts[hall.id]
+                                        val executeCount = itemCount?.executeCount ?: 0
+                                        val totalCount = itemCount?.totalCount ?: 0
+
+                                        DropdownMenuItem(
+                                            text = {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Row(
+                                                        verticalAlignment = Alignment.CenterVertically
+                                                    ) {
+                                                        // ホール色インジケーター
+                                                        Box(
+                                                            modifier = Modifier
+                                                                .size(12.dp)
+                                                                .background(
+                                                                    Color(hall.color),
+                                                                    CircleShape
+                                                                )
+                                                        )
+                                                        Spacer(modifier = Modifier.width(8.dp))
+                                                        Text(
+                                                            hall.name,
+                                                            fontWeight = if (uiState.selectedHallId == hall.id) FontWeight.Bold else FontWeight.Normal
+                                                        )
+                                                    }
+                                                    Text(
+                                                        "(${executeCount}/${totalCount}件)",
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
+                                            },
+                                            onClick = { viewModel.selectHall(hall.id) },
+                                            leadingIcon = {
+                                                if (uiState.selectedHallId == hall.id) {
+                                                    Icon(
+                                                        Icons.Default.Check,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.primary
+                                                    )
+                                                }
+                                            }
+                                        )
+                                    }
                                 }
                             }
                         }
-                    }
-                    // ブロック定義ボタン（マップがある場合のみ表示）
-                    if (uiState.currentMapData != null) {
-                        IconButton(
-                            onClick = { viewModel.openBlockDefinitionPanel() }
-                        ) {
-                            Icon(Icons.Default.GridOn, "ブロック定義")
+                        // 訪問先リストボタン（マップがある場合のみ表示）
+                        if (uiState.currentMapData != null) {
+                            IconButton(
+                                onClick = { viewModel.openVisitListPanel() }
+                            ) {
+                                Icon(Icons.Default.PushPin, "訪問先リスト")
+                            }
                         }
-                        // ホール定義ボタン
+                        // ブロック定義ボタン（マップがある場合のみ表示）
+                        if (uiState.currentMapData != null) {
+                            IconButton(
+                                onClick = { viewModel.openBlockDefinitionPanel() }
+                            ) {
+                                Icon(Icons.Default.GridOn, "ブロック定義")
+                            }
+                            // ホール定義ボタン
+                            IconButton(
+                                onClick = { viewModel.openHallDefinitionPanel() }
+                            ) {
+                                Icon(Icons.Default.Crop, "ホール定義")
+                            }
+                        }
                         IconButton(
-                            onClick = { viewModel.openHallDefinitionPanel() }
+                            onClick = {
+                                filePickerLauncher.launch(arrayOf(
+                                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                    "application/vnd.ms-excel"
+                                ))
+                            }
                         ) {
-                            Icon(Icons.Default.Crop, "ホール定義")
+                            Icon(Icons.Default.FolderOpen, "マップを開く")
                         }
                     }
-                    IconButton(
-                        onClick = {
+                )
+            }
+        ) { paddingValues ->
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+            ) {
+                if (uiState.isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.align(Alignment.Center)
+                    )
+                } else if (uiState.mapDataList.isEmpty()) {
+                    NoMapPlaceholder(
+                        onOpenFile = {
                             filePickerLauncher.launch(arrayOf(
                                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 "application/vnd.ms-excel"
                             ))
                         }
-                    ) {
-                        Icon(Icons.Default.FolderOpen, "マップを開く")
-                    }
-                }
-            )
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            if (uiState.isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            } else if (uiState.mapDataList.isEmpty()) {
-                NoMapPlaceholder(
-                    onOpenFile = {
-                        filePickerLauncher.launch(arrayOf(
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            "application/vnd.ms-excel"
-                        ))
-                    }
-                )
-            } else {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    // タブ
-                    if (uiState.mapDataList.size > 1) {
-                        MapTabs(
-                            mapNames = uiState.mapDataList.keys.toList(),
-                            selectedMapName = uiState.selectedMapName,
-                            onSelectMap = { viewModel.selectMap(it) }
-                        )
-                    }
-
-                    // マップキャンバス
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clipToBounds()
-                    ) {
-                        uiState.currentMapData?.let { mapData ->
-                            MapCanvas(
-                                mapData = mapData,
-                                scale = uiState.scale,
-                                offsetX = uiState.offsetX,
-                                offsetY = uiState.offsetY,
-                                cellItemsMap = uiState.cellItemsMap,
-                                selectedCells = uiState.selectedCells,
-                                isSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
-                                currentSelectionType = uiState.currentSelectionType,
-                                halls = uiState.halls,
-                                selectedHallId = uiState.selectedHallId,
-                                hallMarkers = uiState.hallMarkers,
-                                isHallVertexSelectionMode = uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING,
-                                onPan = { dx, dy -> viewModel.pan(dx, dy) },
-                                onPinchZoom = { newScale, newOffsetX, newOffsetY ->
-                                    viewModel.updateScaleAndOffset(newScale, newOffsetX, newOffsetY)
-                                },
-                                onCellTap = { row, col, items ->
-                                    // セル選択モード中は選択に使用
-                                    if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
-                                        viewModel.addSelectedCell(row, col)
-                                    } else {
-                                        // ブロック定義内かチェックし、ブロック情報を取得
-                                        val blockInfo = findBlockInfoForCell(
-                                            row, col,
-                                            mapData.blocks,
-                                            mapData.cells,
-                                            mapData.mergedCells
-                                        )
-
-                                        when {
-                                            blockInfo != null -> {
-                                                // ブロック定義内のセル
-                                                selectedCellInfo = CellTapInfo(
-                                                    row = row,
-                                                    col = col,
-                                                    blockName = blockInfo.first,
-                                                    number = blockInfo.second,
-                                                    items = items,
-                                                    isInBlockDefinition = true
-                                                )
-                                            }
-                                            items.isNotEmpty() -> {
-                                                // ブロック定義外だがアイテムがある場合
-                                                val firstItem = items.first()
-                                                val numValue = extractNumberFromItemNumber(firstItem.number) ?: 0
-                                                selectedCellInfo = CellTapInfo(
-                                                    row = row,
-                                                    col = col,
-                                                    blockName = firstItem.block,
-                                                    number = numValue,
-                                                    items = items,
-                                                    isInBlockDefinition = false
-                                                )
-                                            }
-                                            // ブロック定義外かつアイテムなし → 何もしない
-                                        }
-                                    }
-                                },
-                                onSelectedCellTap = { row, col ->
-                                    // 選択済みセルをタップしたら選択解除
-                                    viewModel.removeSelectedCell(row, col)
-                                }
+                    )
+                } else {
+                    Column(modifier = Modifier.fillMaxSize()) {
+                        // タブ
+                        if (uiState.mapDataList.size > 1) {
+                            MapTabs(
+                                mapNames = uiState.mapDataList.keys.toList(),
+                                selectedMapName = uiState.selectedMapName,
+                                onSelectMap = { viewModel.selectMap(it) }
                             )
+                        }
 
-                            // セル選択モード中のオーバーレイ
-                            if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
-                                val (title, requiredCount) = when (uiState.currentSelectionType) {
-                                    CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> "4つの角をタップ" to 4
-                                    CellSelectionType.RANGE_START -> "開始点と終了点をタップ" to 2
-                                    CellSelectionType.INDIVIDUAL -> "セルをタップして選択" to -1
-                                    null -> "セルを選択" to 4
-                                }
-                                // 確定ボタンの表示条件
-                                val canConfirm = when (uiState.currentSelectionType) {
-                                    CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> uiState.selectedCells.size >= 4
-                                    CellSelectionType.RANGE_START -> uiState.selectedCells.size >= 2
-                                    CellSelectionType.INDIVIDUAL -> uiState.selectedCells.isNotEmpty()
-                                    null -> uiState.selectedCells.size >= 4
-                                }
-                                CellSelectionOverlay(
-                                    selectedCount = uiState.selectedCells.size,
-                                    requiredCount = requiredCount,
-                                    title = title,
-                                    showConfirmButton = canConfirm,
-                                    onConfirm = { viewModel.confirmSelection() },
-                                    onCancel = { viewModel.cancelCellSelection() }
-                                )
-                            }
-
-                            // ホールマーカー選択モード中のオーバーレイ
-                            if (uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING) {
-                                HallMarkerSelectionOverlay(
-                                    markers = uiState.hallMarkers,
-                                    isPlacingMarker = uiState.isPlacingMarker,
+                        // マップキャンバス
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clipToBounds()
+                        ) {
+                            uiState.currentMapData?.let { mapData ->
+                                MapCanvas(
                                     mapData = mapData,
                                     scale = uiState.scale,
                                     offsetX = uiState.offsetX,
                                     offsetY = uiState.offsetY,
-                                    onStartPlacing = {
-                                        viewModel.startPlacingMarker()
+                                    cellItemsMap = uiState.cellItemsMap,
+                                    visitListItemIds = uiState.visitListItemIds,
+                                    selectedCells = uiState.selectedCells,
+                                    isSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
+                                    currentSelectionType = uiState.currentSelectionType,
+                                    halls = uiState.halls,
+                                    selectedHallId = uiState.selectedHallId,
+                                    hallMarkers = uiState.hallMarkers,
+                                    isHallVertexSelectionMode = uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING,
+                                    onPan = { dx, dy -> viewModel.pan(dx, dy) },
+                                    onPinchZoom = { newScale, newOffsetX, newOffsetY ->
+                                        viewModel.updateScaleAndOffset(newScale, newOffsetX, newOffsetY)
                                     },
-                                    onConfirmPlacement = { row, col ->
-                                        viewModel.confirmMarkerPlacement(row, col)
+                                    onCellTap = { row, col, items ->
+                                        // セル選択モード中は選択に使用
+                                        if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
+                                            viewModel.addSelectedCell(row, col)
+                                        } else {
+                                            // ブロック定義内かチェックし、ブロック情報を取得
+                                            val blockInfo = findBlockInfoForCell(
+                                                row, col,
+                                                mapData.blocks,
+                                                mapData.cells,
+                                                mapData.mergedCells
+                                            )
+
+                                            when {
+                                                blockInfo != null -> {
+                                                    // ブロック定義内のセル
+                                                    selectedCellInfo = CellTapInfo(
+                                                        row = row,
+                                                        col = col,
+                                                        blockName = blockInfo.first,
+                                                        number = blockInfo.second,
+                                                        items = items,
+                                                        isInBlockDefinition = true
+                                                    )
+                                                }
+                                                items.isNotEmpty() -> {
+                                                    // ブロック定義外だがアイテムがある場合
+                                                    val firstItem = items.first()
+                                                    val numValue = extractNumberFromItemNumber(firstItem.number) ?: 0
+                                                    selectedCellInfo = CellTapInfo(
+                                                        row = row,
+                                                        col = col,
+                                                        blockName = firstItem.block,
+                                                        number = numValue,
+                                                        items = items,
+                                                        isInBlockDefinition = false
+                                                    )
+                                                }
+                                                // ブロック定義外かつアイテムなし → 何もしない
+                                            }
+                                        }
                                     },
-                                    onCancelPlacing = {
-                                        viewModel.cancelPlacingMarker()
-                                    },
-                                    onRemoveMarker = { markerId ->
-                                        viewModel.removeHallMarker(markerId)
-                                    },
-                                    onConfirm = {
-                                        viewModel.confirmHallVertexSelection()
-                                        viewModel.showHallDefinitionPanel()
-                                    },
-                                    onCancel = {
-                                        viewModel.cancelHallVertexSelection()
-                                        viewModel.showHallDefinitionPanel()
+                                    onSelectedCellTap = { row, col ->
+                                        // 選択済みセルをタップしたら選択解除
+                                        viewModel.removeSelectedCell(row, col)
                                     }
                                 )
-                            }
-                        } // end of let { mapData -> }
-                    }
-                }
-            }
 
-            // エラーメッセージ
-            uiState.errorMessage?.let { error ->
-                Snackbar(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(16.dp),
-                    action = {
-                        TextButton(onClick = { viewModel.clearError() }) {
-                            Text("閉じる")
+                                // セル選択モード中のオーバーレイ
+                                if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
+                                    val (title, requiredCount) = when (uiState.currentSelectionType) {
+                                        CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> "4つの角をタップ" to 4
+                                        CellSelectionType.RANGE_START -> "開始点と終了点をタップ" to 2
+                                        CellSelectionType.INDIVIDUAL -> "セルをタップして選択" to -1
+                                        null -> "セルを選択" to 4
+                                    }
+                                    // 確定ボタンの表示条件
+                                    val canConfirm = when (uiState.currentSelectionType) {
+                                        CellSelectionType.CORNER, CellSelectionType.MULTI_CORNER -> uiState.selectedCells.size >= 4
+                                        CellSelectionType.RANGE_START -> uiState.selectedCells.size >= 2
+                                        CellSelectionType.INDIVIDUAL -> uiState.selectedCells.isNotEmpty()
+                                        null -> uiState.selectedCells.size >= 4
+                                    }
+                                    CellSelectionOverlay(
+                                        selectedCount = uiState.selectedCells.size,
+                                        requiredCount = requiredCount,
+                                        title = title,
+                                        showConfirmButton = canConfirm,
+                                        onConfirm = { viewModel.confirmSelection() },
+                                        onCancel = { viewModel.cancelCellSelection() }
+                                    )
+                                }
+
+                                // ホールマーカー選択モード中のオーバーレイ
+                                if (uiState.hallVertexSelectionMode == HallVertexSelectionMode.SELECTING) {
+                                    HallMarkerSelectionOverlay(
+                                        markers = uiState.hallMarkers,
+                                        isPlacingMarker = uiState.isPlacingMarker,
+                                        mapData = mapData,
+                                        scale = uiState.scale,
+                                        offsetX = uiState.offsetX,
+                                        offsetY = uiState.offsetY,
+                                        onStartPlacing = {
+                                            viewModel.startPlacingMarker()
+                                        },
+                                        onConfirmPlacement = { row, col ->
+                                            viewModel.confirmMarkerPlacement(row, col)
+                                        },
+                                        onCancelPlacing = {
+                                            viewModel.cancelPlacingMarker()
+                                        },
+                                        onRemoveMarker = { markerId ->
+                                            viewModel.removeHallMarker(markerId)
+                                        },
+                                        onConfirm = {
+                                            viewModel.confirmHallVertexSelection()
+                                            viewModel.showHallDefinitionPanel()
+                                        },
+                                        onCancel = {
+                                            viewModel.cancelHallVertexSelection()
+                                            viewModel.showHallDefinitionPanel()
+                                        }
+                                    )
+                                }
+                            } // end of let { mapData -> }
                         }
                     }
-                ) {
-                    Text(error)
+                }
+
+                // エラーメッセージ
+                uiState.errorMessage?.let { error ->
+                    Snackbar(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(16.dp),
+                        action = {
+                            TextButton(onClick = { viewModel.clearError() }) {
+                                Text("閉じる")
+                            }
+                        }
+                    ) {
+                        Text(error)
+                    }
                 }
             }
         }
-    }
+
+        // 訪問先リストパネル（Scaffoldの上に重ねて表示）
+        uiState.currentMapData?.let { mapData ->
+            VisitListPanel(
+                isOpen = uiState.isVisitListPanelOpen,
+                visitListItemIds = uiState.visitListItemIds,
+                items = uiState.items,
+                halls = uiState.halls,
+                blocks = mapData.blocks,
+                currentDayName = mapData.dayName,
+                displayMode = uiState.visitListDisplayMode,
+                panelWidth = uiState.visitListPanelWidth,
+                onClose = { viewModel.closeVisitListPanel() },
+                onRemoveFromVisitList = { itemId -> viewModel.removeFromVisitList(itemId) },
+                onChangePriority = { itemId, priority -> viewModel.changeItemPriority(itemId, priority) },
+                onChangeDisplayMode = { mode -> viewModel.changeVisitListDisplayMode(mode) },
+                onChangePanelWidth = { width -> viewModel.changeVisitListPanelWidth(width) }
+            )
+        }
+
+    } // end of Box
 }
 
 @Composable
@@ -538,6 +573,7 @@ private fun MapCanvas(
     offsetX: Float,
     offsetY: Float,
     cellItemsMap: Map<String, List<ShoppingItem>>,
+    visitListItemIds: Set<String> = emptySet(),  // 訪問先リストに追加されたアイテムID
     selectedCells: List<Pair<Int, Int>> = emptyList(),
     isSelectionMode: Boolean = false,
     currentSelectionType: CellSelectionType? = null,
@@ -555,7 +591,8 @@ private fun MapCanvas(
 
     // ジェスチャー完了を示すバージョン（パン/ズーム終了時にインクリメント）
     // これをpointerInputのkeyに使用し、操作完了後に座標系を更新
-    var gestureVersion by remember { mutableStateOf(0) }
+    // mapData.idをキーにして、マップ切り替え時にリセット
+    var gestureVersion by remember(mapData.id) { mutableStateOf(0) }
 
     // スケール変更時にgestureVersionを更新
     LaunchedEffect(scale) {
@@ -668,9 +705,10 @@ private fun MapCanvas(
     val hallBoundsPixels = hallBoundsBase
 
     // 現在のスケールとオフセットをローカルで保持（ピンチ操作中の計算用）
-    var localScale by remember { mutableStateOf(scale) }
-    var localOffsetX by remember { mutableStateOf(offsetX) }
-    var localOffsetY by remember { mutableStateOf(offsetY) }
+    // mapData.idをキーにして、マップ切り替え時にリセット
+    var localScale by remember(mapData.id) { mutableStateOf(scale) }
+    var localOffsetX by remember(mapData.id) { mutableStateOf(offsetX) }
+    var localOffsetY by remember(mapData.id) { mutableStateOf(offsetY) }
 
     // 外部から渡されたスケール/オフセットが変わった時に同期
     LaunchedEffect(scale, offsetX, offsetY) {
@@ -680,7 +718,8 @@ private fun MapCanvas(
     }
 
     // ドラッグ中のセル（ハイライト用）
-    var highlightedCell by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // mapData.idをキーにして、マップ切り替え時にリセット
+    var highlightedCell by remember(mapData.id) { mutableStateOf<Pair<Int, Int>?>(null) }
 
     // タップ位置からセル座標を計算する関数（ローカル値を参照）
     fun findCellAtPosition(tapX: Float, tapY: Float): Pair<Int, Int>? {
@@ -940,14 +979,14 @@ private fun MapCanvas(
                             val cell = cellMap[mergeKey]
                             val items = cellItemsMap[mergeKey] ?: emptyList()
 
-                            // 背景色を決定
+                            // 背景色を決定（訪問先リスト状態に基づく）
                             val bgColor = if (items.isNotEmpty()) {
-                                val allPurchased = items.all { it.purchaseStatus == PurchaseStatus.PURCHASED }
-                                val anyPurchased = items.any { it.purchaseStatus == PurchaseStatus.PURCHASED }
+                                val allInVisitList = items.all { visitListItemIds.contains(it.id) }
+                                val anyInVisitList = items.any { visitListItemIds.contains(it.id) }
                                 when {
-                                    allPurchased -> colorGreen
-                                    anyPurchased -> colorYellow
-                                    else -> colorRed
+                                    allInVisitList -> colorRed     // 全アイテム訪問先登録 → 赤
+                                    anyInVisitList -> colorYellow  // 一部アイテム訪問先登録 → 黄
+                                    else -> Color(0xFFBBDEFB)      // 全アイテム未登録 → 青
                                 }
                             } else if (cell?.backgroundColor != null) {
                                 Color(cell.backgroundColor)
@@ -1063,14 +1102,14 @@ private fun MapCanvas(
                         val cellHeight = getRowHeight(row)
                         val items = cellItemsMap[cellKey] ?: emptyList()
 
-                        // 背景色を決定
+                        // 背景色を決定（訪問先リスト状態に基づく）
                         val bgColor = if (items.isNotEmpty()) {
-                            val allPurchased = items.all { it.purchaseStatus == PurchaseStatus.PURCHASED }
-                            val anyPurchased = items.any { it.purchaseStatus == PurchaseStatus.PURCHASED }
+                            val allInVisitList = items.all { visitListItemIds.contains(it.id) }
+                            val anyInVisitList = items.any { visitListItemIds.contains(it.id) }
                             when {
-                                allPurchased -> colorGreen
-                                anyPurchased -> colorYellow
-                                else -> colorRed
+                                allInVisitList -> colorRed     // 全アイテム訪問先登録 → 赤
+                                anyInVisitList -> colorYellow  // 一部アイテム訪問先登録 → 黄
+                                else -> Color(0xFFBBDEFB)      // 全アイテム未登録 → 青
                             }
                         } else if (cell?.backgroundColor != null) {
                             Color(cell.backgroundColor)
@@ -1744,8 +1783,9 @@ private fun CellItemsDialog(
     blockName: String,
     number: Int,
     items: List<ShoppingItem>,
+    visitListItemIds: Set<String>,
     onDismiss: () -> Unit,
-    onUpdateStatus: (String, PurchaseStatus) -> Unit,
+    onToggleVisitList: (String) -> Unit,
     onOpenUrl: (String) -> Unit,
     onAddNewItem: (() -> Unit)? = null
 ) {
@@ -1771,8 +1811,9 @@ private fun CellItemsDialog(
                             style = MaterialTheme.typography.titleLarge
                         )
                         if (items.isNotEmpty()) {
+                            val inListCount = items.count { visitListItemIds.contains(it.id) }
                             Text(
-                                text = "${items.size}件のアイテム",
+                                text = "${items.size}件のアイテム（訪問先: ${inListCount}件）",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -1820,9 +1861,8 @@ private fun CellItemsDialog(
                         items(items) { item ->
                             CellItemRow(
                                 item = item,
-                                onStatusChange = { status ->
-                                    onUpdateStatus(item.id, status)
-                                },
+                                isInVisitList = visitListItemIds.contains(item.id),
+                                onToggleVisitList = { onToggleVisitList(item.id) },
                                 onOpenUrl = {
                                     item.url?.let { onOpenUrl(it) }
                                 }
@@ -1844,115 +1884,88 @@ private fun CellItemsDialog(
 }
 
 /**
- * ダイアログ内のアイテム行
+ * ダイアログ内のアイテム行（訪問先リスト対応）
  */
 @Composable
 private fun CellItemRow(
     item: ShoppingItem,
-    onStatusChange: (PurchaseStatus) -> Unit,
+    isInVisitList: Boolean,
+    onToggleVisitList: () -> Unit,
     onOpenUrl: () -> Unit
 ) {
-    var showStatusMenu by remember { mutableStateOf(false) }
-
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onToggleVisitList() },
         colors = CardDefaults.cardColors(
-            containerColor = when (item.purchaseStatus) {
-                PurchaseStatus.PURCHASED -> Color(0xFFE8F5E9)
-                PurchaseStatus.SOLD_OUT -> Color(0xFFFFCDD2)
-                PurchaseStatus.ABSENT -> Color(0xFFFFF9C4)
-                PurchaseStatus.POSTPONE -> Color(0xFFE1BEE7)
-                PurchaseStatus.LATE -> Color(0xFFBBDEFB)
-                else -> MaterialTheme.colorScheme.surface
+            containerColor = if (isInVisitList) {
+                Color(0xFFE3F2FD)  // 訪問先リストに追加済み：薄い青
+            } else {
+                MaterialTheme.colorScheme.surface
             }
         )
     ) {
-        Column(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(12.dp)
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            // サークル名とタイトル
-            Text(
-                text = item.circle,
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+            // 訪問先リストアイコン
+            Icon(
+                imageVector = Icons.Default.PushPin,
+                contentDescription = if (isInVisitList) "訪問先から削除" else "訪問先に追加",
+                tint = if (isInVisitList) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                },
+                modifier = Modifier.size(24.dp)
             )
 
-            if (item.title.isNotBlank()) {
+            Spacer(modifier = Modifier.width(12.dp))
+
+            // アイテム情報
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                // サークル名
                 Text(
-                    text = item.title,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    text = item.circle,
+                    style = MaterialTheme.typography.titleSmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-            }
 
-            Spacer(modifier = Modifier.height(8.dp))
+                if (item.title.isNotBlank()) {
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
 
-            // 下部：価格、ステータス、URLボタン
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
                 // 価格
                 Text(
                     text = item.priceDisplay,
-                    style = MaterialTheme.typography.bodyMedium
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            // URLボタン
+            if (!item.url.isNullOrBlank()) {
+                IconButton(
+                    onClick = onOpenUrl,
+                    modifier = Modifier.size(32.dp)
                 ) {
-                    // URLボタン
-                    if (!item.url.isNullOrBlank()) {
-                        IconButton(
-                            onClick = onOpenUrl,
-                            modifier = Modifier.size(32.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.OpenInNew,
-                                contentDescription = "URLを開く",
-                                modifier = Modifier.size(18.dp)
-                            )
-                        }
-                    }
-
-                    // ステータス変更ボタン
-                    Box {
-                        TextButton(
-                            onClick = { showStatusMenu = true }
-                        ) {
-                            Text(
-                                text = item.purchaseStatus.displayName,
-                                color = Color(item.purchaseStatus.colorHex)
-                            )
-                        }
-
-                        DropdownMenu(
-                            expanded = showStatusMenu,
-                            onDismissRequest = { showStatusMenu = false }
-                        ) {
-                            PurchaseStatus.entries.forEach { status ->
-                                DropdownMenuItem(
-                                    text = {
-                                        Text(
-                                            text = status.displayName,
-                                            color = Color(status.colorHex)
-                                        )
-                                    },
-                                    onClick = {
-                                        onStatusChange(status)
-                                        showStatusMenu = false
-                                    }
-                                )
-                            }
-                        }
-                    }
+                    Icon(
+                        Icons.Default.OpenInNew,
+                        contentDescription = "URLを開く",
+                        modifier = Modifier.size(18.dp)
+                    )
                 }
             }
         }

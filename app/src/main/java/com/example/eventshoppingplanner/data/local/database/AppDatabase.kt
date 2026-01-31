@@ -6,21 +6,27 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.eventshoppingplanner.data.local.dao.EventDao
 import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
+import com.example.eventshoppingplanner.data.local.dao.HallOrderDao
 import com.example.eventshoppingplanner.data.local.dao.MapDataDao
 import com.example.eventshoppingplanner.data.local.dao.ShoppingItemDao
+import com.example.eventshoppingplanner.data.local.dao.VisitListDao
 import com.example.eventshoppingplanner.data.local.entity.EventEntity
 import com.example.eventshoppingplanner.data.local.entity.HallDefinitionEntity
+import com.example.eventshoppingplanner.data.local.entity.HallOrderEntity
 import com.example.eventshoppingplanner.data.local.entity.MapDataEntity
 import com.example.eventshoppingplanner.data.local.entity.ShoppingItemEntity
+import com.example.eventshoppingplanner.data.local.entity.VisitListEntity
 
 @Database(
     entities = [
         EventEntity::class,
         ShoppingItemEntity::class,
         MapDataEntity::class,
-        HallDefinitionEntity::class
+        HallDefinitionEntity::class,
+        VisitListEntity::class,
+        HallOrderEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -28,6 +34,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun shoppingItemDao(): ShoppingItemDao
     abstract fun mapDataDao(): MapDataDao
     abstract fun hallDefinitionDao(): HallDefinitionDao
+    abstract fun visitListDao(): VisitListDao
+    abstract fun hallOrderDao(): HallOrderDao
 
     companion object {
         val MIGRATION_1_2 = object : Migration(1, 2) {
@@ -59,6 +67,38 @@ abstract class AppDatabase : RoomDatabase() {
                     )
                 """)
                 database.execSQL("CREATE INDEX IF NOT EXISTS index_hall_definitions_mapDataId ON hall_definitions(mapDataId)")
+            }
+        }
+
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(database: SupportSQLiteDatabase) {
+                // 訪問先リストテーブル
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS visit_lists (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        eventId TEXT NOT NULL,
+                        dayName TEXT NOT NULL,
+                        itemIdsJson TEXT NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY (eventId) REFERENCES events(id) ON DELETE CASCADE
+                    )
+                """)
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_visit_lists_eventId ON visit_lists(eventId)")
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_visit_lists_eventId_dayName ON visit_lists(eventId, dayName)")
+
+                // ホール順序テーブル
+                database.execSQL("""
+                    CREATE TABLE IF NOT EXISTS hall_orders (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        eventId TEXT NOT NULL,
+                        dayName TEXT NOT NULL,
+                        groupOrderJson TEXT NOT NULL,
+                        updatedAt INTEGER NOT NULL,
+                        FOREIGN KEY (eventId) REFERENCES events(id) ON DELETE CASCADE
+                    )
+                """)
+                database.execSQL("CREATE INDEX IF NOT EXISTS index_hall_orders_eventId ON hall_orders(eventId)")
+                database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_hall_orders_eventId_dayName ON hall_orders(eventId, dayName)")
             }
         }
     }

@@ -4,8 +4,10 @@ import android.content.Context
 import androidx.room.Room
 import com.example.eventshoppingplanner.data.local.dao.EventDao
 import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
+import com.example.eventshoppingplanner.data.local.dao.HallOrderDao
 import com.example.eventshoppingplanner.data.local.dao.MapDataDao
 import com.example.eventshoppingplanner.data.local.dao.ShoppingItemDao
+import com.example.eventshoppingplanner.data.local.dao.VisitListDao
 import com.example.eventshoppingplanner.data.local.database.AppDatabase
 import com.example.eventshoppingplanner.data.repository.EventRepositoryImpl
 import com.example.eventshoppingplanner.data.repository.MapDataRepositoryImpl
@@ -36,7 +38,8 @@ object AppModule {
         )
             .addMigrations(
                 AppDatabase.MIGRATION_1_2,
-                AppDatabase.MIGRATION_2_3
+                AppDatabase.MIGRATION_2_3,
+                AppDatabase.MIGRATION_3_4
             )
             .fallbackToDestructiveMigration()
             .build()
@@ -64,6 +67,18 @@ object AppModule {
     @Singleton
     fun provideHallDefinitionDao(database: AppDatabase): HallDefinitionDao {
         return database.hallDefinitionDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideVisitListDao(database: AppDatabase): VisitListDao {
+        return database.visitListDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideHallOrderDao(database: AppDatabase): HallOrderDao {
+        return database.hallOrderDao()
     }
 
     @Provides

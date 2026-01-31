@@ -7,7 +7,10 @@ import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
+import com.example.eventshoppingplanner.data.local.dao.HallOrderDao
+import com.example.eventshoppingplanner.data.local.dao.VisitListDao
 import com.example.eventshoppingplanner.data.local.entity.HallDefinitionEntity
+import com.example.eventshoppingplanner.data.local.entity.VisitListEntity
 import com.example.eventshoppingplanner.domain.model.*
 import com.example.eventshoppingplanner.domain.repository.EventRepository
 import com.example.eventshoppingplanner.domain.repository.MapDataRepository
@@ -61,7 +64,13 @@ data class MapUiState(
     val isPlacingMarker: Boolean = false,  // 新規マーカー配置中か
     val selectedHallVertices: List<Vertex> = emptyList(),  // 確定済み頂点（後方互換用）
     val editingHallId: String? = null,  // 編集中のホールID（新規はnull）
-    val pendingHallEditState: HallEditState? = null  // 頂点選択中に保持する編集状態
+    val pendingHallEditState: HallEditState? = null,  // 頂点選択中に保持する編集状態
+    // 訪問先リスト関連
+    val visitListItemIds: Set<String> = emptySet(),  // 訪問先リストに追加されたアイテムID
+    val isVisitListPanelOpen: Boolean = false,  // 訪問先リストパネルの表示状態
+    val visitListDisplayMode: VisitListDisplayMode = VisitListDisplayMode.SIDE_RIGHT,  // 表示モード
+    val visitListPanelWidth: Float = 300f,  // パネル幅（dp）
+    val isRouteVisible: Boolean = true  // ルート表示のON/OFF
 )
 
 /**
@@ -127,13 +136,17 @@ class MapViewModel @Inject constructor(
     private val eventRepository: EventRepository,
     private val itemRepository: ShoppingItemRepository,
     private val mapDataRepository: MapDataRepository,
-    private val hallDefinitionDao: HallDefinitionDao
+    private val hallDefinitionDao: HallDefinitionDao,
+    private val visitListDao: VisitListDao,
+    private val hallOrderDao: HallOrderDao
 ) : ViewModel() {
 
     private val eventId: String = savedStateHandle.get<String>("eventId") ?: ""
 
     private val _uiState = MutableStateFlow(MapUiState())
     val uiState: StateFlow<MapUiState> = _uiState.asStateFlow()
+
+    private val gson = Gson()
 
     init {
         loadEvent()
@@ -180,6 +193,8 @@ class MapViewModel @Inject constructor(
                     updateCellItemsMap()
                     // ホール定義を読み込み
                     loadHallsForCurrentMap()
+                    // 訪問先リストを読み込み
+                    loadVisitListForCurrentMap()
                 } else {
                     Log.d("MapViewModel", "loadSavedMapData: no saved map data found")
                     _uiState.update { it.copy(isLoading = false) }
@@ -291,16 +306,163 @@ class MapViewModel @Inject constructor(
             it.copy(
                 selectedMapName = mapName,
                 currentMapData = mapData,
+                // スケールとオフセットを初期値にリセット
+                scale = 1.0f,
                 offsetX = 0f,
                 offsetY = 0f,
                 // ホール関連をリセット
                 selectedHallId = null,
-                halls = emptyList()
+                halls = emptyList(),
+                // 訪問先リストをリセット（すぐに読み込む）
+                visitListItemIds = emptySet()
             )
         }
         updateCellItemsMap()
         // ホール定義を読み込み
         loadHallsForCurrentMap()
+        // 訪問先リストを読み込み
+        loadVisitListForCurrentMap()
+    }
+
+    // ========================================
+    // 訪問先リスト関連
+    // ========================================
+
+    /**
+     * 現在のマップの訪問先リストをDBから読み込む
+     */
+    private fun loadVisitListForCurrentMap() {
+        val dayName = _uiState.value.currentMapData?.dayName ?: return
+
+        viewModelScope.launch {
+            try {
+                val entity = visitListDao.getVisitListOnce(eventId, dayName)
+                val itemIds = if (entity != null) {
+                    val type = object : TypeToken<List<String>>() {}.type
+                    val list: List<String> = gson.fromJson(entity.itemIdsJson, type)
+                    list.toSet()
+                } else {
+                    emptySet()
+                }
+                _uiState.update { it.copy(visitListItemIds = itemIds) }
+                Log.d("MapViewModel", "loadVisitListForCurrentMap: loaded ${itemIds.size} items for dayName=$dayName")
+                // ホールアイテム数を更新
+                updateHallItemCounts()
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "loadVisitListForCurrentMap: error", e)
+            }
+        }
+    }
+
+    /**
+     * 訪問先リストをDBに保存
+     */
+    private fun saveVisitList() {
+        val dayName = _uiState.value.currentMapData?.dayName ?: return
+        val itemIds = _uiState.value.visitListItemIds.toList()
+
+        viewModelScope.launch {
+            try {
+                val entity = VisitListEntity(
+                    id = "${eventId}_${dayName}",
+                    eventId = eventId,
+                    dayName = dayName,
+                    itemIdsJson = gson.toJson(itemIds)
+                )
+                visitListDao.insertVisitList(entity)
+                Log.d("MapViewModel", "saveVisitList: saved ${itemIds.size} items for dayName=$dayName")
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "saveVisitList: error", e)
+            }
+        }
+    }
+
+    /**
+     * アイテムを訪問先リストに追加
+     */
+    fun addToVisitList(itemId: String) {
+        val currentIds = _uiState.value.visitListItemIds
+        if (currentIds.contains(itemId)) return
+
+        _uiState.update { it.copy(visitListItemIds = currentIds + itemId) }
+        saveVisitList()
+        updateHallItemCounts()
+        Log.d("MapViewModel", "addToVisitList: added itemId=$itemId")
+    }
+
+    /**
+     * アイテムを訪問先リストから削除
+     */
+    fun removeFromVisitList(itemId: String) {
+        val currentIds = _uiState.value.visitListItemIds
+        if (!currentIds.contains(itemId)) return
+
+        _uiState.update { it.copy(visitListItemIds = currentIds - itemId) }
+        saveVisitList()
+        updateHallItemCounts()
+        Log.d("MapViewModel", "removeFromVisitList: removed itemId=$itemId")
+    }
+
+    /**
+     * アイテムが訪問先リストに含まれているかをトグル
+     */
+    fun toggleVisitListItem(itemId: String) {
+        if (_uiState.value.visitListItemIds.contains(itemId)) {
+            removeFromVisitList(itemId)
+        } else {
+            addToVisitList(itemId)
+        }
+    }
+
+    /**
+     * 訪問先リストパネルを開く
+     */
+    fun openVisitListPanel() {
+        _uiState.update { it.copy(isVisitListPanelOpen = true) }
+    }
+
+    /**
+     * 訪問先リストパネルを閉じる
+     */
+    fun closeVisitListPanel() {
+        _uiState.update { it.copy(isVisitListPanelOpen = false) }
+    }
+
+    /**
+     * ルート表示のON/OFFをトグル
+     */
+    fun toggleRouteVisibility() {
+        _uiState.update { it.copy(isRouteVisible = !it.isRouteVisible) }
+    }
+
+    /**
+     * アイテムの優先度を変更
+     */
+    fun changeItemPriority(itemId: String, priorityLevel: PriorityLevel) {
+        viewModelScope.launch {
+            try {
+                val item = _uiState.value.items.find { it.id == itemId } ?: return@launch
+                val updatedItem = item.copy(priorityLevel = priorityLevel)
+                itemRepository.updateItem(updatedItem)
+                Log.d("MapViewModel", "changeItemPriority: itemId=$itemId, priority=$priorityLevel")
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "changeItemPriority: error", e)
+            }
+        }
+    }
+
+    /**
+     * 訪問先リストの表示モードを変更
+     */
+    fun changeVisitListDisplayMode(mode: VisitListDisplayMode) {
+        _uiState.update { it.copy(visitListDisplayMode = mode) }
+    }
+
+    /**
+     * 訪問先リストパネルの幅を変更
+     */
+    fun changeVisitListPanelWidth(width: Float) {
+        _uiState.update { it.copy(visitListPanelWidth = width) }
     }
 
     /**
@@ -617,8 +779,6 @@ class MapViewModel @Inject constructor(
 
     // ===== ホール定義関連 =====
 
-    private val gson = Gson()
-
     /**
      * 現在のマップのホール定義をDBから読み込む
      */
@@ -802,9 +962,15 @@ class MapViewModel @Inject constructor(
      */
     fun updateHallItemCounts() {
         val halls = _uiState.value.halls
-        val items = _uiState.value.items
+        val allItems = _uiState.value.items
         val mapData = _uiState.value.currentMapData ?: return
         val blocks = mapData.blocks
+        val visitListItemIds = _uiState.value.visitListItemIds
+
+        // 現在のマップの日付に一致するアイテムのみをフィルタリング
+        // dayNameは "1日目" の形式、eventDateも "1日目" の形式
+        val dayName = mapData.dayName
+        val items = allItems.filter { it.eventDate == dayName }
 
         val counts = mutableMapOf<String, HallItemCount>()
 
@@ -813,17 +979,41 @@ class MapViewModel @Inject constructor(
             val blocksInHall = HallUtils.getBlocksInHall(hall, blocks)
             val blockNamesInHall = blocksInHall.map { it.name }.toSet()
 
-            // ホール内のアイテム数をカウント
-            val totalCount = items.count { item ->
+            // ホール内のアイテムを取得
+            val itemsInHall = items.filter { item ->
                 blockNamesInHall.contains(item.block)
             }
 
-            // 訪問先リストのカウント（未実装なので0）
-            val executeCount = 0
+            // ホール内の全アイテム数
+            val totalCount = itemsInHall.size
+
+            // 訪問先リストに追加されたアイテム数
+            val executeCount = itemsInHall.count { item ->
+                visitListItemIds.contains(item.id)
+            }
 
             counts[hall.id] = HallItemCount(
                 executeCount = executeCount,
                 totalCount = totalCount
+            )
+        }
+
+        // ホール未定義のアイテムもカウント
+        val definedBlockNames = halls.flatMap { hall ->
+            HallUtils.getBlocksInHall(hall, blocks).map { it.name }
+        }.toSet()
+
+        val undefinedItems = items.filter { item ->
+            !definedBlockNames.contains(item.block)
+        }
+
+        if (undefinedItems.isNotEmpty()) {
+            val undefinedExecuteCount = undefinedItems.count { item ->
+                visitListItemIds.contains(item.id)
+            }
+            counts["undefined"] = HallItemCount(
+                executeCount = undefinedExecuteCount,
+                totalCount = undefinedItems.size
             )
         }
 
