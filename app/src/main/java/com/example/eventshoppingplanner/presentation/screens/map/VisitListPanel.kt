@@ -15,6 +15,7 @@ import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MoreVert
@@ -71,6 +72,7 @@ fun VisitListPanel(
     selectionMode: VisitListSelectionMode,
     rangeStart: String?,
     rangeEnd: String?,
+    groupOrder: List<String>,
     onClose: () -> Unit,
     onRemoveFromVisitList: (String) -> Unit,
     onChangePriority: (String, PriorityLevel) -> Unit,
@@ -82,7 +84,8 @@ fun VisitListPanel(
     onSetSelectionMode: (VisitListSelectionMode) -> Unit,
     onSetRangeStart: (String?) -> Unit,
     onSetRangeEnd: (String?) -> Unit,
-    onReverseRange: () -> Unit
+    onReverseRange: () -> Unit,
+    onOpenHallOrderPanel: () -> Unit
 ) {
     if (!isOpen) return
 
@@ -100,9 +103,9 @@ fun VisitListPanel(
         }
     }
 
-    // グループ化（ホール×優先度）- 順序保持
-    val groupedItems = remember(visitListItems, halls, blocks) {
-        groupItemsByHallAndPriorityOrdered(visitListItems, halls, blocks)
+    // グループ化（ホール×優先度）- グループ順序に従う
+    val groupedItems = remember(visitListItems, halls, blocks, groupOrder) {
+        groupItemsByHallAndPriorityOrdered(visitListItems, halls, blocks, groupOrder)
     }
 
     when (displayMode) {
@@ -116,6 +119,7 @@ fun VisitListPanel(
                 selectionMode = selectionMode,
                 rangeStart = rangeStart,
                 rangeEnd = rangeEnd,
+                hasHalls = halls.isNotEmpty(),
                 onClose = onClose,
                 onRemoveFromVisitList = onRemoveFromVisitList,
                 onChangePriority = onChangePriority,
@@ -134,7 +138,8 @@ fun VisitListPanel(
                 onSetSelectionMode = onSetSelectionMode,
                 onSetRangeStart = onSetRangeStart,
                 onSetRangeEnd = onSetRangeEnd,
-                onReverseRange = onReverseRange
+                onReverseRange = onReverseRange,
+                onOpenHallOrderPanel = onOpenHallOrderPanel
             )
         }
         VisitListDisplayMode.BOTTOM_SHEET -> {
@@ -144,6 +149,7 @@ fun VisitListPanel(
                 selectionMode = selectionMode,
                 rangeStart = rangeStart,
                 rangeEnd = rangeEnd,
+                hasHalls = halls.isNotEmpty(),
                 onClose = onClose,
                 onRemoveFromVisitList = onRemoveFromVisitList,
                 onChangePriority = onChangePriority,
@@ -153,7 +159,8 @@ fun VisitListPanel(
                 onSetSelectionMode = onSetSelectionMode,
                 onSetRangeStart = onSetRangeStart,
                 onSetRangeEnd = onSetRangeEnd,
-                onReverseRange = onReverseRange
+                onReverseRange = onReverseRange,
+                onOpenHallOrderPanel = onOpenHallOrderPanel
             )
         }
     }
@@ -167,17 +174,19 @@ private fun groupItemsByHallAndPriority(
     halls: List<HallDefinition>,
     blocks: List<BlockDefinition>
 ): List<VisitGroup> {
-    return groupItemsByHallAndPriorityOrdered(items, halls, blocks)
+    return groupItemsByHallAndPriorityOrdered(items, halls, blocks, emptyList())
 }
 
 /**
  * アイテムをホール×優先度でグループ化（順序保持版）
  * visitListItemIdsの順序を維持しながらグループ化
+ * groupOrderが指定されている場合はその順序に従う
  */
 private fun groupItemsByHallAndPriorityOrdered(
     items: List<ShoppingItem>,  // 既にvisitListItemIdsの順序で並んでいる
     halls: List<HallDefinition>,
-    blocks: List<BlockDefinition>
+    blocks: List<BlockDefinition>,
+    groupOrder: List<String> = emptyList()
 ): List<VisitGroup> {
     // ホールごとのブロック名マップを作成
     val hallBlockMap = mutableMapOf<String, Set<String>>()
@@ -203,44 +212,52 @@ private fun groupItemsByHallAndPriorityOrdered(
         groupMap.getOrPut(groupId) { mutableListOf() }.add(item)
     }
 
-    // 結果リストを作成（ホール定義順 × 優先度順）
+    // 結果リストを作成
     val groups = mutableListOf<VisitGroup>()
-    val priorityOrder = listOf(PriorityLevel.HIGHEST, PriorityLevel.PRIORITY, PriorityLevel.NONE)
+    val addedGroupIds = mutableSetOf<String>()
 
-    for (hall in halls) {
-        for (priority in priorityOrder) {
-            val groupId = createGroupId(hall.id, priority)
-            val groupItems = groupMap[groupId]
-            if (groupItems != null && groupItems.isNotEmpty()) {
-                groups.add(
-                    VisitGroup(
-                        groupId = groupId,
-                        hallId = hall.id,
-                        hallName = hall.name,
-                        priorityLevel = priority,
-                        items = groupItems
-                    )
-                )
-            }
-        }
-    }
+    // ホールID→ホール名マップ
+    val hallNameMap = halls.associate { it.id to it.name }
 
-    // ホール未定義のアイテム
-    for (priority in priorityOrder) {
-        val groupId = createGroupId(null, priority)
+    // グループIDからVisitGroupを生成するヘルパー
+    fun addGroupIfExists(groupId: String) {
+        if (addedGroupIds.contains(groupId)) return
         val groupItems = groupMap[groupId]
         if (groupItems != null && groupItems.isNotEmpty()) {
+            val (hallId, priority) = parseGroupId(groupId)
             groups.add(
                 VisitGroup(
                     groupId = groupId,
-                    hallId = null,
-                    hallName = "ホール未定義",
+                    hallId = hallId,
+                    hallName = if (hallId != null) hallNameMap[hallId] ?: "ホール未定義" else "ホール未定義",
                     priorityLevel = priority,
                     items = groupItems
                 )
             )
+            addedGroupIds.add(groupId)
         }
     }
+
+    // groupOrderが指定されている場合はその順序に従う
+    if (groupOrder.isNotEmpty()) {
+        groupOrder.forEach { groupId -> addGroupIfExists(groupId) }
+    } else {
+        // デフォルト順序: ホール定義順 × 優先度順
+        val priorityOrder = listOf(PriorityLevel.HIGHEST, PriorityLevel.PRIORITY, PriorityLevel.NONE)
+        for (hall in halls) {
+            for (priority in priorityOrder) {
+                addGroupIfExists(createGroupId(hall.id, priority))
+            }
+        }
+    }
+
+    // groupOrderに含まれないグループを末尾に追加（ホール未定義等）
+    val priorityOrder = listOf(PriorityLevel.HIGHEST, PriorityLevel.PRIORITY, PriorityLevel.NONE)
+    for (priority in priorityOrder) {
+        addGroupIfExists(createGroupId(null, priority))
+    }
+    // 残りのグループ
+    groupMap.keys.forEach { groupId -> addGroupIfExists(groupId) }
 
     return groups
 }
@@ -258,6 +275,7 @@ private fun SidePanel(
     selectionMode: VisitListSelectionMode,
     rangeStart: String?,
     rangeEnd: String?,
+    hasHalls: Boolean,
     onClose: () -> Unit,
     onRemoveFromVisitList: (String) -> Unit,
     onChangePriority: (String, PriorityLevel) -> Unit,
@@ -269,7 +287,8 @@ private fun SidePanel(
     onSetSelectionMode: (VisitListSelectionMode) -> Unit,
     onSetRangeStart: (String?) -> Unit,
     onSetRangeEnd: (String?) -> Unit,
-    onReverseRange: () -> Unit
+    onReverseRange: () -> Unit,
+    onOpenHallOrderPanel: () -> Unit
 ) {
     var currentWidth by remember(width) { mutableStateOf(width) }
     val minWidth = 200f
@@ -319,6 +338,32 @@ private fun SidePanel(
                 if (groupedItems.isEmpty()) {
                     EmptyState()
                 } else {
+                    // 折りたたみ状態管理
+                    var collapsedGroups by remember { mutableStateOf(emptySet<String>()) }
+
+                    // ホール順序ボタン（ホール定義がある場合のみ）
+                    if (hasHalls) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.End
+                        ) {
+                            TextButton(
+                                onClick = onOpenHallOrderPanel,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.SwapVert,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("ホール順序", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+
                     val lazyListState = rememberLazyListState()
                     val reorderableLazyListState = rememberReorderableLazyListState(lazyListState) { from, to ->
                         // ドラッグ＆ドロップ時の処理
@@ -337,59 +382,73 @@ private fun SidePanel(
                         verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         groupedItems.forEach { group ->
-                            // グループヘッダー
+                            val isCollapsed = collapsedGroups.contains(group.groupId)
+
+                            // グループヘッダー（クリックで折りたたみ）
                             item(key = "header_${group.groupId}") {
-                                GroupHeader(group)
+                                GroupHeader(
+                                    group = group,
+                                    isCollapsed = isCollapsed,
+                                    onToggleCollapse = {
+                                        collapsedGroups = if (isCollapsed) {
+                                            collapsedGroups - group.groupId
+                                        } else {
+                                            collapsedGroups + group.groupId
+                                        }
+                                    }
+                                )
                             }
 
-                            // グループ内アイテム
-                            group.items.forEach { item ->
-                                item(key = item.id) {
-                                    ReorderableItem(reorderableLazyListState, key = item.id) {
-                                        val isRangeStart = item.id == rangeStart
-                                        val isRangeEnd = item.id == rangeEnd
-                                        val isInRange = remember(allItemIds, rangeStart, rangeEnd, item.id) {
-                                            if (rangeStart == null || rangeEnd == null) false
-                                            else {
-                                                val startIdx = allItemIds.indexOf(rangeStart)
-                                                val endIdx = allItemIds.indexOf(rangeEnd)
-                                                val itemIdx = allItemIds.indexOf(item.id)
-                                                if (startIdx >= 0 && endIdx >= 0 && itemIdx >= 0) {
-                                                    val min = minOf(startIdx, endIdx)
-                                                    val max = maxOf(startIdx, endIdx)
-                                                    itemIdx in min..max
-                                                } else false
-                                            }
-                                        }
-
-                                        VisitListItemRowWithReorder(
-                                            item = item,
-                                            allItemIds = allItemIds,
-                                            selectionMode = selectionMode,
-                                            isRangeStart = isRangeStart,
-                                            isRangeEnd = isRangeEnd,
-                                            isInRange = isInRange,
-                                            reorderableScope = this,
-                                            onRemove = { onRemoveFromVisitList(item.id) },
-                                            onChangePriority = { priority ->
-                                                onChangePriority(item.id, priority)
-                                            },
-                                            onMoveUp = { onMoveItemUp(item.id) },
-                                            onMoveDown = { onMoveItemDown(item.id) },
-                                            onRangeSelect = {
-                                                if (rangeStart == null) {
-                                                    onSetRangeStart(item.id)
-                                                } else if (rangeEnd == null) {
-                                                    onSetRangeEnd(item.id)
-                                                } else {
-                                                    // 再選択: リセットして新しい開始点に
-                                                    onSetRangeStart(item.id)
+                            // 折りたたまれていない場合のみアイテム表示
+                            if (!isCollapsed) {
+                                group.items.forEach { item ->
+                                    item(key = item.id) {
+                                        ReorderableItem(reorderableLazyListState, key = item.id) {
+                                            val isRangeStart = item.id == rangeStart
+                                            val isRangeEnd = item.id == rangeEnd
+                                            val isInRange = remember(allItemIds, rangeStart, rangeEnd, item.id) {
+                                                if (rangeStart == null || rangeEnd == null) false
+                                                else {
+                                                    val startIdx = allItemIds.indexOf(rangeStart)
+                                                    val endIdx = allItemIds.indexOf(rangeEnd)
+                                                    val itemIdx = allItemIds.indexOf(item.id)
+                                                    if (startIdx >= 0 && endIdx >= 0 && itemIdx >= 0) {
+                                                        val min = minOf(startIdx, endIdx)
+                                                        val max = maxOf(startIdx, endIdx)
+                                                        itemIdx in min..max
+                                                    } else false
                                                 }
                                             }
-                                        )
+
+                                            VisitListItemRowWithReorder(
+                                                item = item,
+                                                allItemIds = allItemIds,
+                                                selectionMode = selectionMode,
+                                                isRangeStart = isRangeStart,
+                                                isRangeEnd = isRangeEnd,
+                                                isInRange = isInRange,
+                                                reorderableScope = this,
+                                                onRemove = { onRemoveFromVisitList(item.id) },
+                                                onChangePriority = { priority ->
+                                                    onChangePriority(item.id, priority)
+                                                },
+                                                onMoveUp = { onMoveItemUp(item.id) },
+                                                onMoveDown = { onMoveItemDown(item.id) },
+                                                onRangeSelect = {
+                                                    if (rangeStart == null) {
+                                                        onSetRangeStart(item.id)
+                                                    } else if (rangeEnd == null) {
+                                                        onSetRangeEnd(item.id)
+                                                    } else {
+                                                        // 再選択: リセットして新しい開始点に
+                                                        onSetRangeStart(item.id)
+                                                    }
+                                                }
+                                            )
+                                        }
                                     }
                                 }
-                            }
+                            } // if (!isCollapsed)
                         }
                     }
                 }
@@ -597,10 +656,14 @@ private fun PanelHeaderWithMode(
 }
 
 /**
- * グループヘッダー
+ * グループヘッダー（折りたたみ対応）
  */
 @Composable
-private fun GroupHeader(group: VisitGroup) {
+private fun GroupHeader(
+    group: VisitGroup,
+    isCollapsed: Boolean = false,
+    onToggleCollapse: () -> Unit = {}
+) {
     val priorityColor = when (group.priorityLevel) {
         PriorityLevel.HIGHEST -> Color(0xFFE53935)  // 赤
         PriorityLevel.PRIORITY -> Color(0xFFFF9800) // オレンジ
@@ -616,9 +679,18 @@ private fun GroupHeader(group: VisitGroup) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable { onToggleCollapse() }
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
+        // 折りたたみアイコン
+        Icon(
+            imageVector = if (isCollapsed) Icons.Default.ChevronRight else Icons.Default.ExpandMore,
+            contentDescription = if (isCollapsed) "展開" else "折りたたみ",
+            modifier = Modifier.size(18.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(modifier = Modifier.width(4.dp))
         // 優先度インジケーター
         Box(
             modifier = Modifier
@@ -1099,6 +1171,7 @@ private fun BottomSheetPanel(
     selectionMode: VisitListSelectionMode,
     rangeStart: String?,
     rangeEnd: String?,
+    hasHalls: Boolean,
     onClose: () -> Unit,
     onRemoveFromVisitList: (String) -> Unit,
     onChangePriority: (String, PriorityLevel) -> Unit,
@@ -1108,7 +1181,8 @@ private fun BottomSheetPanel(
     onSetSelectionMode: (VisitListSelectionMode) -> Unit,
     onSetRangeStart: (String?) -> Unit,
     onSetRangeEnd: (String?) -> Unit,
-    onReverseRange: () -> Unit
+    onReverseRange: () -> Unit,
+    onOpenHallOrderPanel: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
     val canReverse = rangeStart != null && rangeEnd != null && rangeStart != rangeEnd
@@ -1195,6 +1269,30 @@ private fun BottomSheetPanel(
             if (groupedItems.isEmpty()) {
                 EmptyState()
             } else {
+                // 折りたたみ状態管理
+                var collapsedGroups by remember { mutableStateOf(emptySet<String>()) }
+
+                // ホール順序ボタン（ホール定義がある場合のみ）
+                if (hasHalls) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End
+                    ) {
+                        TextButton(
+                            onClick = onOpenHallOrderPanel,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.SwapVert,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("ホール順序", style = MaterialTheme.typography.labelSmall)
+                        }
+                    }
+                }
+
                 val lazyListState = rememberLazyListState()
                 val reorderableLazyListState = rememberReorderableLazyListState(lazyListState) { from, to ->
                     val fromIndex = allItemIds.indexOf(from.key as? String ?: "")
@@ -1212,56 +1310,70 @@ private fun BottomSheetPanel(
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     groupedItems.forEach { group ->
+                        val isCollapsed = collapsedGroups.contains(group.groupId)
+
                         item(key = "header_${group.groupId}") {
-                            GroupHeader(group)
+                            GroupHeader(
+                                group = group,
+                                isCollapsed = isCollapsed,
+                                onToggleCollapse = {
+                                    collapsedGroups = if (isCollapsed) {
+                                        collapsedGroups - group.groupId
+                                    } else {
+                                        collapsedGroups + group.groupId
+                                    }
+                                }
+                            )
                         }
 
-                        group.items.forEach { item ->
-                            item(key = item.id) {
-                                ReorderableItem(reorderableLazyListState, key = item.id) {
-                                    val isRangeStart = item.id == rangeStart
-                                    val isRangeEnd = item.id == rangeEnd
-                                    val isInRange = remember(allItemIds, rangeStart, rangeEnd, item.id) {
-                                        if (rangeStart == null || rangeEnd == null) false
-                                        else {
-                                            val startIdx = allItemIds.indexOf(rangeStart)
-                                            val endIdx = allItemIds.indexOf(rangeEnd)
-                                            val itemIdx = allItemIds.indexOf(item.id)
-                                            if (startIdx >= 0 && endIdx >= 0 && itemIdx >= 0) {
-                                                val min = minOf(startIdx, endIdx)
-                                                val max = maxOf(startIdx, endIdx)
-                                                itemIdx in min..max
-                                            } else false
-                                        }
-                                    }
-
-                                    VisitListItemRowWithReorder(
-                                        item = item,
-                                        allItemIds = allItemIds,
-                                        selectionMode = selectionMode,
-                                        isRangeStart = isRangeStart,
-                                        isRangeEnd = isRangeEnd,
-                                        isInRange = isInRange,
-                                        reorderableScope = this,
-                                        onRemove = { onRemoveFromVisitList(item.id) },
-                                        onChangePriority = { priority ->
-                                            onChangePriority(item.id, priority)
-                                        },
-                                        onMoveUp = { onMoveItemUp(item.id) },
-                                        onMoveDown = { onMoveItemDown(item.id) },
-                                        onRangeSelect = {
-                                            if (rangeStart == null) {
-                                                onSetRangeStart(item.id)
-                                            } else if (rangeEnd == null) {
-                                                onSetRangeEnd(item.id)
-                                            } else {
-                                                onSetRangeStart(item.id)
+                        if (!isCollapsed) {
+                            group.items.forEach { item ->
+                                item(key = item.id) {
+                                    ReorderableItem(reorderableLazyListState, key = item.id) {
+                                        val isRangeStart = item.id == rangeStart
+                                        val isRangeEnd = item.id == rangeEnd
+                                        val isInRange = remember(allItemIds, rangeStart, rangeEnd, item.id) {
+                                            if (rangeStart == null || rangeEnd == null) false
+                                            else {
+                                                val startIdx = allItemIds.indexOf(rangeStart)
+                                                val endIdx = allItemIds.indexOf(rangeEnd)
+                                                val itemIdx = allItemIds.indexOf(item.id)
+                                                if (startIdx >= 0 && endIdx >= 0 && itemIdx >= 0) {
+                                                    val min = minOf(startIdx, endIdx)
+                                                    val max = maxOf(startIdx, endIdx)
+                                                    itemIdx in min..max
+                                                } else false
                                             }
                                         }
-                                    )
+
+                                        VisitListItemRowWithReorder(
+                                            item = item,
+                                            allItemIds = allItemIds,
+                                            selectionMode = selectionMode,
+                                            isRangeStart = isRangeStart,
+                                            isRangeEnd = isRangeEnd,
+                                            isInRange = isInRange,
+                                            reorderableScope = this,
+                                            onRemove = { onRemoveFromVisitList(item.id) },
+                                            onChangePriority = { priority ->
+                                                onChangePriority(item.id, priority)
+                                            },
+                                            onMoveUp = { onMoveItemUp(item.id) },
+                                            onMoveDown = { onMoveItemDown(item.id) },
+                                            onRangeSelect = {
+                                                if (rangeStart == null) {
+                                                    onSetRangeStart(item.id)
+                                                } else if (rangeEnd == null) {
+                                                    onSetRangeEnd(item.id)
+                                                } else {
+                                                    onSetRangeStart(item.id)
+                                                }
+                                            }
+                                        )
+                                    }
                                 }
                             }
-                        }
+                        } // if (!isCollapsed)
                     }
                 }
             }

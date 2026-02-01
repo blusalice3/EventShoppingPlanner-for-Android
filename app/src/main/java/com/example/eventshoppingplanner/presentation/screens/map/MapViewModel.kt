@@ -10,12 +10,16 @@ import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
 import com.example.eventshoppingplanner.data.local.dao.HallOrderDao
 import com.example.eventshoppingplanner.data.local.dao.VisitListDao
 import com.example.eventshoppingplanner.data.local.entity.HallDefinitionEntity
+import com.example.eventshoppingplanner.data.local.entity.HallOrderEntity
 import com.example.eventshoppingplanner.data.local.entity.VisitListEntity
 import com.example.eventshoppingplanner.domain.model.*
+import com.example.eventshoppingplanner.domain.model.createGroupId
+import com.example.eventshoppingplanner.domain.model.parseGroupId
 import com.example.eventshoppingplanner.domain.repository.EventRepository
 import com.example.eventshoppingplanner.domain.repository.MapDataRepository
 import com.example.eventshoppingplanner.domain.repository.ShoppingItemRepository
 import com.example.eventshoppingplanner.util.HallUtils
+import com.example.eventshoppingplanner.util.PathfindingUtils
 import com.example.eventshoppingplanner.util.XlsxMapParser
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -73,14 +77,20 @@ data class MapUiState(
     val isRouteVisible: Boolean = true,  // ルート表示のON/OFF
     val visitListSelectionMode: VisitListSelectionMode = VisitListSelectionMode.NORMAL,  // 選択モード
     val visitListRangeStart: String? = null,  // 範囲選択の開始アイテムID
-    val visitListRangeEnd: String? = null  // 範囲選択の終了アイテムID
+    val visitListRangeEnd: String? = null,  // 範囲選択の終了アイテムID
+    // ルート描画関連
+    val visitPoints: List<VisitPoint> = emptyList(),  // 訪問ポイント（描画用）
+    val routeSegments: List<RouteSegment> = emptyList(),  // ルートセグメント（描画用）
+    // グループ順序関連
+    val groupOrder: List<String> = emptyList(),  // グループID（"hallId_PRIORITY"等）の順序
+    val isHallOrderPanelOpen: Boolean = false  // ホール順序パネルの表示状態
 )
 
 /**
  * ホールごとのアイテム数
  */
 data class HallItemCount(
-    val executeCount: Int,  // 訪問先リストに追加されたアイテム数（現時点では常に0）
+    val executeCount: Int,  // 訪問先リストに追加されたアイテム数
     val totalCount: Int     // ホール内の全アイテム数
 )
 
@@ -317,11 +327,13 @@ class MapViewModel @Inject constructor(
                 selectedHallId = null,
                 halls = emptyList(),
                 // 訪問先リストをリセット（すぐに読み込む）
-                visitListItemIds = emptyList()
+                visitListItemIds = emptyList(),
+                // グループ順序をリセット
+                groupOrder = emptyList()
             )
         }
         updateCellItemsMap()
-        // ホール定義を読み込み
+        // ホール定義を読み込み（内部でgroupOrderも読み込み・同期する）
         loadHallsForCurrentMap()
         // 訪問先リストを読み込み
         loadVisitListForCurrentMap()
@@ -350,6 +362,8 @@ class MapViewModel @Inject constructor(
                 Log.d("MapViewModel", "loadVisitListForCurrentMap: loaded ${itemIds.size} items for dayName=$dayName")
                 // ホールアイテム数を更新
                 updateHallItemCounts()
+                // ルートデータを生成
+                generateRouteData()
             } catch (e: Exception) {
                 Log.e("MapViewModel", "loadVisitListForCurrentMap: error", e)
             }
@@ -379,6 +393,257 @@ class MapViewModel @Inject constructor(
         }
     }
 
+    // ========================================
+    // グループ順序関連
+    // ========================================
+
+    /**
+     * 現在のマップのグループ順序をDBから読み込み、ホール定義と同期する
+     * loadHallsForCurrentMap() 内からホール読み込み完了後に呼ばれる（順序保証）
+     */
+    private suspend fun loadAndSyncGroupOrder(halls: List<HallDefinition>) {
+        val dayName = _uiState.value.currentMapData?.dayName ?: return
+
+        try {
+            val entity = hallOrderDao.getHallOrderOnce(eventId, dayName)
+            val savedOrder: List<String> = if (entity != null) {
+                val type = object : TypeToken<List<String>>() {}.type
+                gson.fromJson(entity.groupOrderJson, type) ?: emptyList()
+            } else {
+                emptyList()
+            }
+
+            if (savedOrder.isEmpty()) {
+                // DBに保存されていなければデフォルト順序を生成
+                generateDefaultGroupOrder()
+                Log.d("MapViewModel", "loadAndSyncGroupOrder: generated default order for dayName=$dayName")
+            } else {
+                // DB読み込み後、現在のホール定義と同期
+                _uiState.update { it.copy(groupOrder = savedOrder) }
+                syncGroupOrderWithHalls(halls)
+                Log.d("MapViewModel", "loadAndSyncGroupOrder: loaded and synced ${_uiState.value.groupOrder.size} groups for dayName=$dayName")
+            }
+        } catch (e: Exception) {
+            Log.e("MapViewModel", "loadAndSyncGroupOrder: error", e)
+            generateDefaultGroupOrder()
+        }
+    }
+
+    /**
+     * デフォルトのグループ順序を生成
+     * ホール定義順 × (最優先→優先→通常) の全組み合わせ
+     */
+    fun generateDefaultGroupOrder() {
+        val halls = _uiState.value.halls
+        val priorityOrder = listOf(PriorityLevel.HIGHEST, PriorityLevel.PRIORITY, PriorityLevel.NONE)
+
+        val order = mutableListOf<String>()
+
+        // ホール定義順 × 優先度順
+        for (hall in halls) {
+            for (priority in priorityOrder) {
+                order.add(createGroupId(hall.id, priority))
+            }
+        }
+
+        // ホール未定義グループ
+        for (priority in priorityOrder) {
+            order.add(createGroupId(null, priority))
+        }
+
+        _uiState.update { it.copy(groupOrder = order) }
+        Log.d("MapViewModel", "generateDefaultGroupOrder: ${order.size} groups")
+    }
+
+    /**
+     * グループ順序をDBに保存
+     */
+    private fun saveGroupOrder() {
+        val dayName = _uiState.value.currentMapData?.dayName ?: return
+        val groupOrder = _uiState.value.groupOrder
+
+        viewModelScope.launch {
+            try {
+                val entity = HallOrderEntity(
+                    id = "${eventId}_${dayName}",
+                    eventId = eventId,
+                    dayName = dayName,
+                    groupOrderJson = gson.toJson(groupOrder)
+                )
+                hallOrderDao.insertHallOrder(entity)
+                Log.d("MapViewModel", "saveGroupOrder: saved ${groupOrder.size} groups for dayName=$dayName")
+            } catch (e: Exception) {
+                Log.e("MapViewModel", "saveGroupOrder: error", e)
+            }
+        }
+    }
+
+    /**
+     * グループ順序を更新（HallOrderPanelから呼ばれる）
+     */
+    fun updateGroupOrder(newOrder: List<String>) {
+        _uiState.update { it.copy(groupOrder = newOrder) }
+        saveGroupOrder()
+        // ルートは並び替え時にのみ再生成（順序変更だけでは描画に影響しない）
+        Log.d("MapViewModel", "updateGroupOrder: ${newOrder.size} groups")
+    }
+
+    /**
+     * ホール順序パネルを開く
+     */
+    fun openHallOrderPanel() {
+        _uiState.update { it.copy(isHallOrderPanelOpen = true) }
+    }
+
+    /**
+     * ホール順序パネルを閉じる
+     */
+    fun closeHallOrderPanel() {
+        _uiState.update { it.copy(isHallOrderPanelOpen = false) }
+    }
+
+    /**
+     * ホール定義の変更後にgroupOrderを同期する
+     * - 新しいホールのグループIDを末尾に追加
+     * - 削除されたホールのグループIDを除去
+     * - 既存の順序は維持
+     */
+    private fun syncGroupOrderWithHalls(halls: List<HallDefinition>) {
+        val currentOrder = _uiState.value.groupOrder
+        val priorityOrder = listOf(PriorityLevel.HIGHEST, PriorityLevel.PRIORITY, PriorityLevel.NONE)
+
+        // 現在のホールIDセット
+        val currentHallIds = halls.map { it.id }.toSet()
+
+        // 全ホールの全グループIDセット（未定義含む）
+        val allValidGroupIds = mutableSetOf<String>()
+        halls.forEach { hall ->
+            priorityOrder.forEach { priority ->
+                allValidGroupIds.add(createGroupId(hall.id, priority))
+            }
+        }
+        priorityOrder.forEach { priority ->
+            allValidGroupIds.add(createGroupId(null, priority))
+        }
+
+        // 1) 削除されたホールのグループIDを除去（既存順序維持）
+        val filteredOrder = currentOrder.filter { groupId ->
+            val (hallId, _) = parseGroupId(groupId)
+            hallId == null || currentHallIds.contains(hallId)
+        }
+
+        // 2) 新しいホールのグループIDを末尾に追加
+        val existingGroupIds = filteredOrder.toSet()
+        val newGroupIds = mutableListOf<String>()
+        halls.forEach { hall ->
+            priorityOrder.forEach { priority ->
+                val groupId = createGroupId(hall.id, priority)
+                if (!existingGroupIds.contains(groupId)) {
+                    newGroupIds.add(groupId)
+                }
+            }
+        }
+        // 未定義グループも不足があれば追加
+        priorityOrder.forEach { priority ->
+            val groupId = createGroupId(null, priority)
+            if (!existingGroupIds.contains(groupId)) {
+                newGroupIds.add(groupId)
+            }
+        }
+
+        val newOrder = filteredOrder + newGroupIds
+        _uiState.update { it.copy(groupOrder = newOrder) }
+        saveGroupOrder()
+        Log.d("MapViewModel", "syncGroupOrderWithHalls: ${currentOrder.size} -> ${newOrder.size} groups (added ${newGroupIds.size}, removed ${currentOrder.size - filteredOrder.size})")
+    }
+
+    /**
+     * グループ順序に従って訪問先リストを並び替え
+     */
+    fun reorderVisitListByGroupOrder() {
+        val state = _uiState.value
+        val groupOrder = state.groupOrder
+        val visitListItemIds = state.visitListItemIds
+        val items = state.items
+        val halls = state.halls
+        val mapData = state.currentMapData ?: return
+        val blocks = mapData.blocks
+        val dayName = mapData.dayName
+
+        if (visitListItemIds.isEmpty() || groupOrder.isEmpty()) return
+
+        val itemsMap = items.associateBy { it.id }
+
+        // ブロック名→ホールIDマップを作成
+        val blockToHallMap = mutableMapOf<String, String?>()
+        halls.forEach { hall ->
+            val blocksInHall = HallUtils.getBlocksInHall(hall, blocks)
+            blocksInHall.forEach { block ->
+                blockToHallMap[block.name] = hall.id
+            }
+        }
+
+        // 各アイテムのグループIDを取得
+        fun getItemGroupId(itemId: String): String {
+            val item = itemsMap[itemId] ?: return createGroupId(null, PriorityLevel.NONE)
+            val hallId = blockToHallMap[item.block]
+            return createGroupId(hallId, item.priorityLevel)
+        }
+
+        // グループごとにアイテムを分類（既存の順序を保持）
+        val groupedItems = mutableMapOf<String, MutableList<String>>()
+        visitListItemIds.forEach { itemId ->
+            val groupId = getItemGroupId(itemId)
+            groupedItems.getOrPut(groupId) { mutableListOf() }.add(itemId)
+        }
+
+        // グループ順序に従って連結
+        val reordered = mutableListOf<String>()
+        groupOrder.forEach { groupId ->
+            groupedItems[groupId]?.let { reordered.addAll(it) }
+            groupedItems.remove(groupId)
+        }
+        // グループ順序に含まれないアイテム（あれば末尾に追加）
+        groupedItems.values.forEach { reordered.addAll(it) }
+
+        _uiState.update { it.copy(visitListItemIds = reordered) }
+        saveVisitList()
+        updateHallItemCounts()
+        generateRouteData()
+        Log.d("MapViewModel", "reorderVisitListByGroupOrder: reordered ${reordered.size} items")
+    }
+
+    /**
+     * グループ内のアイテム数を取得（グループIDで）
+     */
+    fun getGroupItemCount(groupId: String): Int {
+        val state = _uiState.value
+        val visitListItemIds = state.visitListItemIds
+        val items = state.items
+        val halls = state.halls
+        val mapData = state.currentMapData ?: return 0
+        val blocks = mapData.blocks
+
+        val itemsMap = items.associateBy { it.id }
+
+        // ブロック名→ホールIDマップ
+        val blockToHallMap = mutableMapOf<String, String?>()
+        halls.forEach { hall ->
+            val blocksInHall = HallUtils.getBlocksInHall(hall, blocks)
+            blocksInHall.forEach { block ->
+                blockToHallMap[block.name] = hall.id
+            }
+        }
+
+        val (targetHallId, targetPriority) = parseGroupId(groupId)
+
+        return visitListItemIds.count { itemId ->
+            val item = itemsMap[itemId] ?: return@count false
+            val itemHallId = blockToHallMap[item.block]
+            itemHallId == targetHallId && item.priorityLevel == targetPriority
+        }
+    }
+
     /**
      * アイテムを訪問先リストに追加
      */
@@ -389,6 +654,7 @@ class MapViewModel @Inject constructor(
         _uiState.update { it.copy(visitListItemIds = currentIds + itemId) }
         saveVisitList()
         updateHallItemCounts()
+        generateRouteData()
         Log.d("MapViewModel", "addToVisitList: added itemId=$itemId")
     }
 
@@ -402,6 +668,7 @@ class MapViewModel @Inject constructor(
         _uiState.update { it.copy(visitListItemIds = currentIds.filter { it != itemId }) }
         saveVisitList()
         updateHallItemCounts()
+        generateRouteData()
         Log.d("MapViewModel", "removeFromVisitList: removed itemId=$itemId")
     }
 
@@ -435,6 +702,83 @@ class MapViewModel @Inject constructor(
      */
     fun toggleRouteVisibility() {
         _uiState.update { it.copy(isRouteVisible = !it.isRouteVisible) }
+    }
+
+    /**
+     * ルートデータを生成（訪問ポイントとルートセグメント）
+     */
+    private fun generateRouteData() {
+        val state = _uiState.value
+        val mapData = state.currentMapData ?: return
+        val visitListItemIds = state.visitListItemIds
+        val items = state.items
+        val dayName = mapData.dayName
+
+        if (visitListItemIds.isEmpty()) {
+            _uiState.update { it.copy(visitPoints = emptyList(), routeSegments = emptyList()) }
+            return
+        }
+
+        // アイテムIDからアイテムマップを作成
+        val itemsMap = items.associateBy { it.id }
+
+        // visitListItemIdsの順序でVisitPointを生成
+        val visitPoints = mutableListOf<VisitPoint>()
+        var order = 0
+
+        visitListItemIds.forEach { itemId ->
+            val item = itemsMap[itemId] ?: return@forEach
+            // 現在の日付のアイテムのみ
+            if (item.eventDate != dayName) return@forEach
+
+            // ブロックを検索
+            val blockName = item.block.trim()
+            val block = mapData.blocks.find { it.name == blockName }
+                ?: mapData.blocks.find { it.name.equals(blockName, ignoreCase = true) }
+                ?: return@forEach
+
+            // スペース番号からセル座標を取得
+            val numberStr = extractNumber(item.number)
+            val number = numberStr?.toIntOrNull() ?: return@forEach
+            val cell = block.numberCells.find { it.value == number } ?: return@forEach
+
+            visitPoints.add(
+                VisitPoint(
+                    row = cell.row,
+                    col = cell.col,
+                    order = order,
+                    priorityLevel = item.priorityLevel,
+                    itemId = item.id
+                )
+            )
+            order++
+        }
+
+        // ルートセグメントを生成
+        val routeSegments = if (visitPoints.size >= 2) {
+            val blockNameCells = PathfindingUtils.generateBlockNameCells(mapData)
+            PathfindingUtils.generateRouteSegments(mapData, visitPoints, blockNameCells)
+        } else {
+            emptyList()
+        }
+
+        _uiState.update {
+            it.copy(
+                visitPoints = visitPoints,
+                routeSegments = routeSegments
+            )
+        }
+
+        Log.d("MapViewModel", "generateRouteData: ${visitPoints.size} points, ${routeSegments.size} segments")
+    }
+
+    /**
+     * アイテム番号から数値部分を抽出
+     */
+    private fun extractNumber(number: String): String? {
+        // "12a" -> "12", "12" -> "12", "a12b" -> "12"
+        val match = Regex("\\d+").find(number)
+        return match?.value
     }
 
     /**
@@ -485,6 +829,7 @@ class MapViewModel @Inject constructor(
 
         _uiState.update { it.copy(visitListItemIds = currentIds) }
         saveVisitList()
+        generateRouteData()
         Log.d("MapViewModel", "moveItemInVisitList: from=$fromIndex to=$toIndex")
     }
 
@@ -586,6 +931,7 @@ class MapViewModel @Inject constructor(
             )
         }
         saveVisitList()
+        generateRouteData()
         Log.d("MapViewModel", "reverseVisitListRange: reversed from $actualStart to $actualEnd")
     }
 
@@ -933,6 +1279,9 @@ class MapViewModel @Inject constructor(
                 }
                 _uiState.update { it.copy(halls = halls) }
                 Log.d("MapViewModel", "loadHallsForCurrentMap: updated state with ${halls.size} halls")
+
+                // ホール読み込み後にgroupOrderをDB読み込み→同期（順序保証）
+                loadAndSyncGroupOrder(halls)
             } catch (e: Exception) {
                 Log.e("MapViewModel", "Failed to load halls", e)
             }
@@ -1270,6 +1619,9 @@ class MapViewModel @Inject constructor(
                 hallDefinitionDao.insertHalls(entities)
                 _uiState.update { it.copy(halls = halls) }
                 Log.d("MapViewModel", "saveHalls: completed successfully")
+
+                // ホール変更後にgroupOrderを同期
+                syncGroupOrderWithHalls(halls)
             } catch (e: Exception) {
                 Log.e("MapViewModel", "Failed to save halls", e)
             }

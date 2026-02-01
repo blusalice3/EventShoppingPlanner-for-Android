@@ -28,6 +28,7 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Remove
+import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -307,6 +308,21 @@ fun MapScreen(
                                 }
                             }
                         }
+                        // ルート表示トグルボタン（マップがある場合のみ表示）
+                        if (uiState.currentMapData != null) {
+                            IconButton(
+                                onClick = { viewModel.toggleRouteVisibility() }
+                            ) {
+                                Icon(
+                                    Icons.Default.Timeline,
+                                    contentDescription = "ルート表示",
+                                    tint = if (uiState.isRouteVisible)
+                                        MaterialTheme.colorScheme.primary
+                                    else
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                )
+                            }
+                        }
                         // 訪問先リストボタン（マップがある場合のみ表示）
                         if (uiState.currentMapData != null) {
                             IconButton(
@@ -386,6 +402,9 @@ fun MapScreen(
                                     offsetY = uiState.offsetY,
                                     cellItemsMap = uiState.cellItemsMap,
                                     visitListItemIds = uiState.visitListItemIds,
+                                    visitPoints = uiState.visitPoints,
+                                    routeSegments = uiState.routeSegments,
+                                    isRouteVisible = uiState.isRouteVisible,
                                     selectedCells = uiState.selectedCells,
                                     isSelectionMode = uiState.cellSelectionMode != CellSelectionMode.NONE,
                                     currentSelectionType = uiState.currentSelectionType,
@@ -538,6 +557,7 @@ fun MapScreen(
                 selectionMode = uiState.visitListSelectionMode,
                 rangeStart = uiState.visitListRangeStart,
                 rangeEnd = uiState.visitListRangeEnd,
+                groupOrder = uiState.groupOrder,
                 onClose = { viewModel.closeVisitListPanel() },
                 onRemoveFromVisitList = { itemId -> viewModel.removeFromVisitList(itemId) },
                 onChangePriority = { itemId, priority -> viewModel.changeItemPriority(itemId, priority) },
@@ -549,7 +569,19 @@ fun MapScreen(
                 onSetSelectionMode = { mode -> viewModel.setVisitListSelectionMode(mode) },
                 onSetRangeStart = { itemId -> viewModel.setVisitListRangeStart(itemId) },
                 onSetRangeEnd = { itemId -> viewModel.setVisitListRangeEnd(itemId) },
-                onReverseRange = { viewModel.reverseVisitListRange() }
+                onReverseRange = { viewModel.reverseVisitListRange() },
+                onOpenHallOrderPanel = { viewModel.openHallOrderPanel() }
+            )
+
+            // ホール順序パネル
+            HallOrderPanel(
+                isOpen = uiState.isHallOrderPanelOpen,
+                groupOrder = uiState.groupOrder,
+                halls = uiState.halls,
+                onClose = { viewModel.closeHallOrderPanel() },
+                onSave = { newOrder -> viewModel.updateGroupOrder(newOrder) },
+                onReorderExecuteList = { viewModel.reorderVisitListByGroupOrder() },
+                getGroupItemCount = { groupId -> viewModel.getGroupItemCount(groupId) }
             )
         }
 
@@ -584,6 +616,9 @@ private fun MapCanvas(
     offsetY: Float,
     cellItemsMap: Map<String, List<ShoppingItem>>,
     visitListItemIds: List<String> = emptyList(),  // 訪問先リストに追加されたアイテムID
+    visitPoints: List<VisitPoint> = emptyList(),  // 訪問ポイント（ルート描画用）
+    routeSegments: List<RouteSegment> = emptyList(),  // ルートセグメント（ルート描画用）
+    isRouteVisible: Boolean = true,  // ルート表示のON/OFF
     selectedCells: List<Pair<Int, Int>> = emptyList(),
     isSelectionMode: Boolean = false,
     currentSelectionType: CellSelectionType? = null,
@@ -1323,6 +1358,190 @@ private fun MapCanvas(
                             )
                         )
                     )
+                }
+            }
+
+            // ルート描画（訪問ポイント間の経路）
+            if (isRouteVisible && routeSegments.isNotEmpty()) {
+                // 基準セルサイズ（デフォルトセルサイズ × スケール）
+                val baseCellSize = minOf(
+                    mapData.defaultColumnWidth,
+                    mapData.defaultRowHeight
+                ) * drawScale
+
+                // 優先度ごとの色を定義
+                fun getPriorityColor(priority: PriorityLevel): Color {
+                    return when (priority) {
+                        PriorityLevel.HIGHEST -> Color(0xFFEF4444)  // 赤
+                        PriorityLevel.PRIORITY -> Color(0xFFF97316)  // オレンジ
+                        PriorityLevel.NONE -> Color(0xFF1976D2)  // 青
+                    }
+                }
+
+                // エッジごとの通過情報を収集（重複検出用）
+                val edgeUsage = mutableMapOf<String, MutableSet<PriorityLevel>>()
+
+                fun getEdgeKey(r1: Int, c1: Int, r2: Int, c2: Int): String {
+                    // 常に小さい座標を先にして正規化
+                    return if (r1 < r2 || (r1 == r2 && c1 < c2)) {
+                        "$r1,$c1-$r2,$c2"
+                    } else {
+                        "$r2,$c2-$r1,$c1"
+                    }
+                }
+
+                // 全セグメントのエッジを収集
+                routeSegments.forEach { segment ->
+                    if (segment.path.size < 2) return@forEach
+                    // グループ間接続はグレーなので重複カウントに含めない
+                    if (segment.isGroupTransition) return@forEach
+
+                    val priority = segment.fromPriority
+
+                    for (i in 0 until segment.path.size - 1) {
+                        val p1 = segment.path[i]
+                        val p2 = segment.path[i + 1]
+                        val key = getEdgeKey(p1.first, p1.second, p2.first, p2.second)
+
+                        if (!edgeUsage.containsKey(key)) {
+                            edgeUsage[key] = mutableSetOf()
+                        }
+                        edgeUsage[key]!!.add(priority)
+                    }
+                }
+
+                // 線幅
+                val lineWidth = maxOf(2f, baseCellSize * 0.08f)
+                // 平行線のオフセット量
+                val parallelOffset = maxOf(3f, baseCellSize * 0.12f)
+
+                // 線をオフセットする関数
+                fun getOffsetPoints(
+                    px1: Float, py1: Float, px2: Float, py2: Float, offset: Float
+                ): List<Float> {
+                    val dx = px2 - px1
+                    val dy = py2 - py1
+                    val len = kotlin.math.sqrt(dx * dx + dy * dy)
+                    if (len == 0f) return listOf(px1, py1, px2, py2)
+
+                    // 法線ベクトル（90度回転）
+                    val nx = -dy / len
+                    val ny = dx / len
+
+                    return listOf(
+                        px1 + nx * offset,
+                        py1 + ny * offset,
+                        px2 + nx * offset,
+                        py2 + ny * offset
+                    )
+                }
+
+                // セグメントを描画
+                routeSegments.forEach { segment ->
+                    if (segment.path.size < 2) return@forEach
+
+                    val isTransition = segment.isGroupTransition
+                    val segmentPriority = segment.fromPriority
+
+                    // グループ間接続はグレー
+                    val baseColor = if (isTransition) Color(0xFF9CA3AF) else getPriorityColor(segmentPriority)
+
+                    // パスをエッジごとに描画
+                    for (i in 0 until segment.path.size - 1) {
+                        val p1 = segment.path[i]
+                        val p2 = segment.path[i + 1]
+                        val edgeKey = getEdgeKey(p1.first, p1.second, p2.first, p2.second)
+
+                        // セルの中心座標を計算
+                        val px1 = getColumnX(p1.second) + getColumnWidth(p1.second) / 2
+                        val py1 = getRowY(p1.first) + getRowHeight(p1.first) / 2
+                        val px2 = getColumnX(p2.second) + getColumnWidth(p2.second) / 2
+                        val py2 = getRowY(p2.first) + getRowHeight(p2.first) / 2
+
+                        // グループ間接続は重複チェック不要（中央に描画）
+                        if (isTransition) {
+                            drawLine(
+                                color = baseColor,
+                                start = Offset(px1, py1),
+                                end = Offset(px2, py2),
+                                strokeWidth = lineWidth,
+                                cap = androidx.compose.ui.graphics.StrokeCap.Round
+                            )
+                            continue
+                        }
+
+                        // 重複しているエッジかどうかを確認
+                        val usedPriorities = edgeUsage[edgeKey]
+                        val isOverlapping = usedPriorities != null && usedPriorities.size > 1
+
+                        if (isOverlapping) {
+                            // 重複エッジ：平行線で描画
+                            val priorities = usedPriorities!!.toList().sortedBy {
+                                when (it) {
+                                    PriorityLevel.HIGHEST -> 0
+                                    PriorityLevel.PRIORITY -> 1
+                                    PriorityLevel.NONE -> 2
+                                }
+                            }
+
+                            val myIndex = priorities.indexOf(segmentPriority)
+                            val totalCount = priorities.size
+
+                            // オフセットを計算（中央を基準に左右に分散）
+                            val offset = (myIndex - (totalCount - 1) / 2f) * parallelOffset
+                            val offsetPoints = getOffsetPoints(px1, py1, px2, py2, offset)
+
+                            drawLine(
+                                color = baseColor,
+                                start = Offset(offsetPoints[0], offsetPoints[1]),
+                                end = Offset(offsetPoints[2], offsetPoints[3]),
+                                strokeWidth = lineWidth,
+                                cap = androidx.compose.ui.graphics.StrokeCap.Round
+                            )
+                        } else {
+                            // 重複なし：中央に描画
+                            drawLine(
+                                color = baseColor,
+                                start = Offset(px1, py1),
+                                end = Offset(px2, py2),
+                                strokeWidth = lineWidth,
+                                cap = androidx.compose.ui.graphics.StrokeCap.Round
+                            )
+                        }
+                    }
+                }
+
+                // 訪問順番号バッジを描画（詳細表示時: 60%以上のスケール）
+                val isDetailedView = scale >= 0.6f
+                if (isDetailedView) {
+                    visitPoints.forEach { point ->
+                        val px = getColumnX(point.col) + getColumnWidth(point.col) / 2
+                        val py = getRowY(point.row) + getRowHeight(point.row) / 2
+
+                        val circleSize = maxOf(12f, baseCellSize * 0.5f)
+                        val pointColor = getPriorityColor(point.priorityLevel)
+
+                        // 背景の円
+                        drawCircle(
+                            color = pointColor,
+                            radius = circleSize / 2,
+                            center = Offset(px, py)
+                        )
+
+                        // 番号を描画（nativeCanvasを使用）
+                        drawContext.canvas.nativeCanvas.apply {
+                            val textPaint = android.graphics.Paint().apply {
+                                color = android.graphics.Color.WHITE
+                                textSize = maxOf(8f, circleSize * 0.6f)
+                                textAlign = android.graphics.Paint.Align.CENTER
+                                isFakeBoldText = true
+                                isAntiAlias = true
+                            }
+                            val text = (point.order + 1).toString()
+                            val textY = py + textPaint.textSize / 3
+                            drawText(text, px, textY, textPaint)
+                        }
+                    }
                 }
             }
         }

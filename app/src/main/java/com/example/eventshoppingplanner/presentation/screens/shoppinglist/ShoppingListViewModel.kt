@@ -1,13 +1,18 @@
 package com.example.eventshoppingplanner.presentation.screens.shoppinglist
 
+import android.util.Log
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.eventshoppingplanner.data.local.dao.VisitListDao
+import com.example.eventshoppingplanner.data.local.entity.VisitListEntity
 import com.example.eventshoppingplanner.domain.model.Event
 import com.example.eventshoppingplanner.domain.model.PurchaseStatus
 import com.example.eventshoppingplanner.domain.model.ShoppingItem
 import com.example.eventshoppingplanner.domain.repository.EventRepository
 import com.example.eventshoppingplanner.domain.repository.ShoppingItemRepository
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -38,17 +43,20 @@ data class ShoppingListUiState(
     val showAddItemDialog: Boolean = false,
     val showEditItemDialog: Boolean = false,
     val editingItem: ShoppingItem? = null,
-    val duplicateSpaceItemIds: Set<String> = emptySet()
+    val duplicateSpaceItemIds: Set<String> = emptySet(),
+    val visitListItemIds: Map<String, List<String>> = emptyMap()  // 日付ごとの訪問先リスト
 )
 
 @HiltViewModel
 class ShoppingListViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val eventRepository: EventRepository,
-    private val itemRepository: ShoppingItemRepository
+    private val itemRepository: ShoppingItemRepository,
+    private val visitListDao: VisitListDao
 ) : ViewModel() {
 
     private val eventId: String = savedStateHandle.get<String>("eventId") ?: ""
+    private val gson = Gson()
 
     private val _uiState = MutableStateFlow(ShoppingListUiState())
     val uiState: StateFlow<ShoppingListUiState> = _uiState.asStateFlow()
@@ -58,6 +66,7 @@ class ShoppingListViewModel @Inject constructor(
 
     init {
         loadEvent()
+        loadVisitLists()
         loadData()
     }
 
@@ -65,6 +74,29 @@ class ShoppingListViewModel @Inject constructor(
         viewModelScope.launch {
             val event = eventRepository.getEventById(eventId)
             _uiState.update { it.copy(event = event) }
+        }
+    }
+
+    /**
+     * 訪問先リストを読み込む（全日付分）
+     */
+    private fun loadVisitLists() {
+        viewModelScope.launch {
+            try {
+                visitListDao.getVisitListsByEventId(eventId).collect { entities ->
+                    val visitListMap = entities.associate { entity ->
+                        val type = object : TypeToken<List<String>>() {}.type
+                        val itemIds: List<String> = gson.fromJson(entity.itemIdsJson, type) ?: emptyList()
+                        entity.dayName to itemIds
+                    }
+                    _uiState.update { it.copy(visitListItemIds = visitListMap) }
+                    // フィルタリングを更新
+                    refreshFilteredItems()
+                    Log.d("ShoppingListViewModel", "loadVisitLists: loaded ${visitListMap.size} days")
+                }
+            } catch (e: Exception) {
+                Log.e("ShoppingListViewModel", "loadVisitLists: error", e)
+            }
         }
     }
 
@@ -85,8 +117,11 @@ class ShoppingListViewModel @Inject constructor(
                     dates.firstOrNull()
                 }
 
-                // フィルタリング
-                val filtered = filterItemsInternal(items, effectiveDate, currentState.selectedBlock, currentState.searchQuery)
+                // フィルタリング（訪問先リストを考慮）
+                val filtered = filterItemsInternal(
+                    items, effectiveDate, currentState.selectedBlock,
+                    currentState.searchQuery, currentState.visitListItemIds
+                )
 
                 // 複数種アイテムIDを計算（同じスペースに複数アイテムがあるもの）
                 val duplicateIds = calculateDuplicateSpaceItemIds(items, effectiveDate)
@@ -176,9 +211,10 @@ class ShoppingListViewModel @Inject constructor(
         items: List<ShoppingItem>,
         selectedDate: String?,
         selectedBlock: String?,
-        searchQuery: String
+        searchQuery: String,
+        visitListItemIds: Map<String, List<String>>
     ): List<ShoppingItem> {
-        return items.filter { item ->
+        val filtered = items.filter { item ->
             val dateMatch = selectedDate == null || item.eventDate == selectedDate
             val blockMatch = selectedBlock == null || item.block == selectedBlock
             val searchMatch = searchQuery.isEmpty() ||
@@ -186,7 +222,19 @@ class ShoppingListViewModel @Inject constructor(
                     item.title.contains(searchQuery, ignoreCase = true) ||
                     item.remarks.contains(searchQuery, ignoreCase = true)
             dateMatch && blockMatch && searchMatch
-        }.sortedBy { it.sortOrder }
+        }
+
+        // 訪問先リスト順にソート
+        // 1. 訪問先リストに含まれるアイテム（訪問順）
+        // 2. 訪問先リストに含まれないアイテム（作成順/sortOrder）
+        val currentVisitList = selectedDate?.let { visitListItemIds[it] } ?: emptyList()
+
+        return filtered.sortedWith(
+            compareBy<ShoppingItem> {
+                val index = currentVisitList.indexOf(it.id)
+                if (index >= 0) index else Int.MAX_VALUE
+            }.thenBy { it.sortOrder }
+        )
     }
 
     fun selectDate(date: String?) {
@@ -208,7 +256,10 @@ class ShoppingListViewModel @Inject constructor(
 
     private fun refreshFilteredItems() {
         val state = _uiState.value
-        val filtered = filterItemsInternal(state.allItems, state.selectedDate, state.selectedBlock, state.searchQuery)
+        val filtered = filterItemsInternal(
+            state.allItems, state.selectedDate, state.selectedBlock,
+            state.searchQuery, state.visitListItemIds
+        )
         _uiState.update { it.copy(items = filtered) }
     }
 
@@ -315,6 +366,8 @@ class ShoppingListViewModel @Inject constructor(
         saveOrderJob = viewModelScope.launch {
             delay(300)
             saveSortOrder(currentItems)
+            // 訪問先リストの同期
+            syncVisitListOrder(currentItems)
         }
     }
 
@@ -332,6 +385,43 @@ class ShoppingListViewModel @Inject constructor(
 
                 itemRepository.updateSortOrder(item.id, newOrder)
             }
+        }
+    }
+
+    /**
+     * ShoppingListの並び順を訪問先リストに同期
+     * 訪問先リスト内のアイテムのみ、新しい順序で更新
+     */
+    private suspend fun syncVisitListOrder(items: List<ShoppingItem>) {
+        val state = _uiState.value
+        val selectedDate = state.selectedDate ?: return
+        val currentVisitList = state.visitListItemIds[selectedDate] ?: return
+
+        if (currentVisitList.isEmpty()) return
+
+        // 訪問先リストに含まれるアイテムIDのセット
+        val visitListSet = currentVisitList.toSet()
+
+        // 現在の表示順序から訪問先リストに含まれるアイテムだけを抽出（順序維持）
+        val newVisitListOrder = items
+            .filter { visitListSet.contains(it.id) }
+            .map { it.id }
+
+        // 順序が変わっていない場合はスキップ
+        if (newVisitListOrder == currentVisitList) return
+
+        // DBに保存
+        try {
+            val entity = VisitListEntity(
+                id = "${eventId}_${selectedDate}",
+                eventId = eventId,
+                dayName = selectedDate,
+                itemIdsJson = gson.toJson(newVisitListOrder)
+            )
+            visitListDao.insertVisitList(entity)
+            Log.d("ShoppingListViewModel", "syncVisitListOrder: updated ${newVisitListOrder.size} items for $selectedDate")
+        } catch (e: Exception) {
+            Log.e("ShoppingListViewModel", "syncVisitListOrder: error", e)
         }
     }
 
