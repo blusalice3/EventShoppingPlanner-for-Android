@@ -7,6 +7,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.example.eventshoppingplanner.presentation.screens.createevent.CreateEventScreen
 import com.example.eventshoppingplanner.presentation.screens.eventlist.EventListScreen
 import com.example.eventshoppingplanner.presentation.screens.map.MapScreen
 import com.example.eventshoppingplanner.presentation.screens.settings.SettingsScreen
@@ -14,6 +15,7 @@ import com.example.eventshoppingplanner.presentation.screens.shoppinglist.Shoppi
 
 sealed class Screen(val route: String) {
     data object EventList : Screen("event_list")
+    data object CreateEvent : Screen("create_event")
     data object ShoppingList : Screen("shopping_list/{eventId}") {
         fun createRoute(eventId: String) = "shopping_list/$eventId"
     }
@@ -36,11 +38,22 @@ fun AppNavigation(
                 onNavigateToShoppingList = { eventId ->
                     navController.navigate(Screen.ShoppingList.createRoute(eventId))
                 },
-                onNavigateToImport = {
-                    // インポート画面への遷移（現在は未実装なので何もしない）
+                onNavigateToCreateEvent = {
+                    navController.navigate(Screen.CreateEvent.route)
                 },
                 onNavigateToSettings = {
                     navController.navigate(Screen.Settings.route)
+                }
+            )
+        }
+
+        composable(Screen.CreateEvent.route) {
+            CreateEventScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateToShoppingList = { eventId ->
+                    navController.navigate(Screen.ShoppingList.createRoute(eventId)) {
+                        popUpTo(Screen.CreateEvent.route) { inclusive = true }
+                    }
                 }
             )
         }

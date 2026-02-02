@@ -58,7 +58,7 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun EventListScreen(
     onNavigateToShoppingList: (String) -> Unit,
-    onNavigateToImport: () -> Unit,
+    onNavigateToCreateEvent: () -> Unit,
     onNavigateToSettings: () -> Unit,
     viewModel: EventListViewModel = hiltViewModel()
 ) {
@@ -81,7 +81,7 @@ fun EventListScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = { viewModel.showCreateDialog() }
+                onClick = onNavigateToCreateEvent
             ) {
                 Icon(Icons.Default.Add, contentDescription = "新規作成")
             }
@@ -109,7 +109,7 @@ fun EventListScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(16.dp))
-                        Button(onClick = { viewModel.showCreateDialog() }) {
+                        Button(onClick = onNavigateToCreateEvent) {
                             Icon(Icons.Default.Add, contentDescription = null)
                             Spacer(modifier = Modifier.width(8.dp))
                             Text("新規作成")
@@ -136,13 +136,6 @@ fun EventListScreen(
         }
     }
 
-    // 新規作成ダイアログ
-    if (uiState.showCreateDialog) {
-        CreateEventDialog(
-            onDismiss = { viewModel.hideCreateDialog() },
-            onCreate = { name -> viewModel.createEvent(name) }
-        )
-    }
 
     // 長押しメニュー（BottomSheet）
     if (uiState.selectedEvent != null) {
@@ -222,42 +215,6 @@ private fun EventCard(
             }
         }
     }
-}
-
-@Composable
-private fun CreateEventDialog(
-    onDismiss: () -> Unit,
-    onCreate: (String) -> Unit
-) {
-    var eventName by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("新規イベント作成") },
-        text = {
-            OutlinedTextField(
-                value = eventName,
-                onValueChange = { eventName = it },
-                label = { Text("イベント名") },
-                placeholder = { Text("例: コミケC105") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth()
-            )
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onCreate(eventName) },
-                enabled = eventName.isNotBlank()
-            ) {
-                Text("作成")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("キャンセル")
-            }
-        }
-    )
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
