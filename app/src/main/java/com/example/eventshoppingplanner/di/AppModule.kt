@@ -2,7 +2,9 @@ package com.example.eventshoppingplanner.di
 
 import android.content.Context
 import androidx.room.Room
+import com.example.eventshoppingplanner.data.local.dao.DayModeDao
 import com.example.eventshoppingplanner.data.local.dao.EventDao
+import com.example.eventshoppingplanner.data.local.dao.ExecuteListDao
 import com.example.eventshoppingplanner.data.local.dao.HallDefinitionDao
 import com.example.eventshoppingplanner.data.local.dao.HallOrderDao
 import com.example.eventshoppingplanner.data.local.dao.MapDataDao
@@ -39,7 +41,8 @@ object AppModule {
             .addMigrations(
                 AppDatabase.MIGRATION_1_2,
                 AppDatabase.MIGRATION_2_3,
-                AppDatabase.MIGRATION_3_4
+                AppDatabase.MIGRATION_3_4,
+                AppDatabase.MIGRATION_4_5
             )
             .fallbackToDestructiveMigration()
             .build()
@@ -79,6 +82,18 @@ object AppModule {
     @Singleton
     fun provideHallOrderDao(database: AppDatabase): HallOrderDao {
         return database.hallOrderDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideExecuteListDao(database: AppDatabase): ExecuteListDao {
+        return database.executeListDao()
+    }
+
+    @Provides
+    @Singleton
+    fun provideDayModeDao(database: AppDatabase): DayModeDao {
+        return database.dayModeDao()
     }
 
     @Provides

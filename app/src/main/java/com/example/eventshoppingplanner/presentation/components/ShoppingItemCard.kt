@@ -2,9 +2,10 @@ package com.example.eventshoppingplanner.presentation.components
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -88,19 +89,37 @@ private enum class WarningTag(
     NO_CONSIGNMENT("委託無", Color(0xFFF44336), Color.White, Icons.Default.Warning)
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ShoppingItemCard(
     item: ShoppingItem,
     onStatusClick: () -> Unit,
     onItemClick: () -> Unit,
     modifier: Modifier = Modifier,
+    scale: Float = 1.0f,
     showDragHandle: Boolean = false,
     reorderableScope: ReorderableCollectionItemScope? = null,
     onPriceChange: ((Int?) -> Unit)? = null,
-    isDuplicateCircle: Boolean = false
+    isDuplicateCircle: Boolean = false,
+    onLongClick: (() -> Unit)? = null,
+    highlightBorderColor: Color? = null
 ) {
     val context = LocalContext.current
     var priceDropdownExpanded by remember { mutableStateOf(false) }
+
+    // スケーリングされたサイズ
+    val scaledPadding = (12 * scale).dp
+    val scaledHorizontalPadding = (8 * scale).dp
+    val scaledVerticalPadding = (4 * scale).dp
+    val scaledTitleSize = (16 * scale).sp
+    val scaledBodySize = (14 * scale).sp
+    val scaledLabelSize = (12 * scale).sp
+    val scaledSmallSize = (11 * scale).sp
+    val scaledIconSize = (32 * scale).dp
+    val scaledDragHandleSize = (24 * scale).dp
+    val scaledUrlIconSize = (16 * scale).dp
+    val scaledTagIconSize = (16 * scale).dp
+    val scaledStatusButtonSize = (48 * scale).dp
 
     // 警告タグを判定
     val warningTags = remember(item.remarks, isDuplicateCircle) {
@@ -140,16 +159,22 @@ fun ShoppingItemCard(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 4.dp)
+            .padding(horizontal = scaledHorizontalPadding, vertical = scaledVerticalPadding)
             .then(
-                if (hasWarnings && !isCompleted) {
-                    Modifier.border(
+                when {
+                    // ハイライトボーダー（範囲選択 / グループ）が最優先
+                    highlightBorderColor != null -> Modifier.border(
+                        width = 3.dp,
+                        color = highlightBorderColor,
+                        shape = RoundedCornerShape(8.dp)
+                    )
+                    // 警告ボーダー
+                    hasWarnings && !isCompleted -> Modifier.border(
                         width = 3.dp,
                         color = Color(0xFFFF9800),
                         shape = RoundedCornerShape(8.dp)
                     )
-                } else {
-                    Modifier
+                    else -> Modifier
                 }
             ),
         shape = RoundedCornerShape(8.dp),
@@ -162,19 +187,22 @@ fun ShoppingItemCard(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
+                        .padding(horizontal = scaledPadding, vertical = scaledVerticalPadding),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     warningTags.forEach { tag ->
-                        WarningBadge(tag = tag)
+                        WarningBadge(tag = tag, scale = scale)
                     }
                 }
             }
 
             Row(
                 modifier = Modifier
-                    .clickable(onClick = onItemClick)
-                    .padding(12.dp),
+                    .combinedClickable(
+                        onClick = onItemClick,
+                        onLongClick = onLongClick
+                    )
+                    .padding(scaledPadding),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // ドラッグハンドル（編集モード時のみ表示）
@@ -184,25 +212,25 @@ fun ShoppingItemCard(
                             imageVector = Icons.Default.DragHandle,
                             contentDescription = "ドラッグして並び替え",
                             modifier = Modifier
-                                .size(24.dp)
+                                .size(scaledDragHandleSize)
                                 .draggableHandle(),
                             tint = Color.Gray
                         )
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width((8 * scale).dp))
                 }
 
-                // メインコンテンツ
+                // 左側: メインコンテンツ
                 Column(
                     modifier = Modifier.weight(1f)
                 ) {
-                    // 参加日・場所 + URLリンク
+                    // 1行目: 参加日・場所 + URLリンク + 備考
                     Row(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = "${item.eventDate} ${item.locationDisplay}",
-                            style = MaterialTheme.typography.labelMedium,
+                            fontSize = scaledLabelSize,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
@@ -213,142 +241,160 @@ fun ShoppingItemCard(
                                     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(item.url))
                                     context.startActivity(intent)
                                 },
-                                modifier = Modifier.size(24.dp)
+                                modifier = Modifier.size((24 * scale).dp)
                             ) {
                                 Icon(
                                     imageVector = Icons.Default.OpenInNew,
                                     contentDescription = "URLを開く",
-                                    modifier = Modifier.size(16.dp),
+                                    modifier = Modifier.size(scaledUrlIconSize),
                                     tint = Color(0xFF2196F3)
                                 )
                             }
                         }
+
+                        // 備考（場所/URLの右に表示）
+                        if (item.remarks.isNotBlank()) {
+                            Spacer(modifier = Modifier.width((4 * scale).dp))
+                            Text(
+                                text = "📝${item.remarks}",
+                                fontSize = scaledSmallSize,
+                                color = Color.Gray,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                        }
                     }
 
+                    // 2行目: サークル名
                     Text(
                         text = item.circle,
-                        style = MaterialTheme.typography.titleMedium,
+                        fontSize = scaledTitleSize,
+                        fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
 
+                    // 3行目: タイトル
                     Text(
                         text = item.title.ifEmpty { "（タイトルなし）" },
-                        style = MaterialTheme.typography.bodyMedium,
+                        fontSize = scaledBodySize,
                         textDecoration = if (isCompleted) TextDecoration.LineThrough else null,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         color = if (isCompleted) Color.Gray else Color.Unspecified
                     )
-
-                    if (item.remarks.isNotBlank()) {
-                        Text(
-                            text = "📝 ${item.remarks}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = Color.Gray,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
                 }
 
-                // 価格（ドロップダウン選択可能）
+                // 右側: 価格（上）+ ステータスボタン（下）を縦に積む
                 Box {
                     Column(
-                        horizontalAlignment = Alignment.End,
-                        modifier = Modifier.padding(horizontal = 8.dp)
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.padding(start = (4 * scale).dp)
                     ) {
-                        if (onPriceChange != null) {
-                            // 価格変更可能（クリックでドロップダウン表示）
-                            TextButton(
-                                onClick = { priceDropdownExpanded = true }
-                            ) {
-                                Text(
-                                    text = priceText,
-                                    style = MaterialTheme.typography.titleMedium,
-                                    color = priceColor
-                                )
-                            }
-                        } else {
-                            // 価格表示のみ
-                            Text(
-                                text = priceText,
-                                style = MaterialTheme.typography.titleMedium,
-                                color = priceColor
-                            )
-                        }
-
-                        // 数量が1より大きい場合は表示
-                        if (item.quantity > 1) {
-                            Text(
-                                text = "×${item.quantity}",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-
-                    // 価格ドロップダウンメニュー
-                    DropdownMenu(
-                        expanded = priceDropdownExpanded,
-                        onDismissRequest = { priceDropdownExpanded = false }
-                    ) {
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    "価格未定",
-                                    color = Color(0xFFF44336)
-                                )
-                            },
-                            onClick = {
-                                onPriceChange?.invoke(null)
-                                priceDropdownExpanded = false
-                            }
-                        )
-                        priceOptions.filterNotNull().forEach { price ->
-                            DropdownMenuItem(
-                                text = { Text("¥${price}") },
-                                onClick = {
-                                    onPriceChange?.invoke(price)
-                                    priceDropdownExpanded = false
+                        // 価格ドロップダウン
+                        Box {
+                            if (onPriceChange != null) {
+                                TextButton(
+                                    onClick = { priceDropdownExpanded = true }
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = priceText,
+                                            fontSize = scaledBodySize,
+                                            color = priceColor
+                                        )
+                                        if (item.quantity > 1) {
+                                            Text(
+                                                text = "×${item.quantity}",
+                                                fontSize = scaledSmallSize,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
                                 }
-                            )
+                            } else {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    modifier = Modifier.padding(horizontal = (8 * scale).dp)
+                                ) {
+                                    Text(
+                                        text = priceText,
+                                        fontSize = scaledBodySize,
+                                        color = priceColor
+                                    )
+                                    if (item.quantity > 1) {
+                                        Text(
+                                            text = "×${item.quantity}",
+                                            fontSize = scaledSmallSize,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
+
+                            // 価格ドロップダウンメニュー
+                            DropdownMenu(
+                                expanded = priceDropdownExpanded,
+                                onDismissRequest = { priceDropdownExpanded = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = {
+                                        Text("価格未定", color = Color(0xFFF44336))
+                                    },
+                                    onClick = {
+                                        onPriceChange?.invoke(null)
+                                        priceDropdownExpanded = false
+                                    }
+                                )
+                                priceOptions.filterNotNull().forEach { price ->
+                                    DropdownMenuItem(
+                                        text = { Text("¥${price}") },
+                                        onClick = {
+                                            onPriceChange?.invoke(price)
+                                            priceDropdownExpanded = false
+                                        }
+                                    )
+                                }
+                            }
                         }
+
+                        // 購入状態ボタン（価格の下）
+                        StatusButton(
+                            status = item.purchaseStatus,
+                            onClick = onStatusClick,
+                            size = scaledStatusButtonSize,
+                            iconSize = scaledIconSize
+                        )
                     }
                 }
-
-                // 購入状態ボタン
-                StatusButton(
-                    status = item.purchaseStatus,
-                    onClick = onStatusClick
-                )
             }
         }
     }
 }
 
 @Composable
-private fun WarningBadge(tag: WarningTag) {
+private fun WarningBadge(tag: WarningTag, scale: Float = 1.0f) {
     Row(
         modifier = Modifier
             .background(
                 color = tag.backgroundColor,
                 shape = RoundedCornerShape(4.dp)
             )
-            .padding(horizontal = 8.dp, vertical = 4.dp),
+            .padding(horizontal = (8 * scale).dp, vertical = (4 * scale).dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Icon(
             imageVector = tag.icon,
             contentDescription = null,
-            modifier = Modifier.size(16.dp),
+            modifier = Modifier.size((16 * scale).dp),
             tint = tag.textColor
         )
         Text(
             text = tag.label,
             color = tag.textColor,
-            fontSize = 12.sp,
+            fontSize = (12 * scale).sp,
             fontWeight = FontWeight.Bold
         )
     }
@@ -358,7 +404,9 @@ private fun WarningBadge(tag: WarningTag) {
 fun StatusButton(
     status: PurchaseStatus,
     onClick: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    size: androidx.compose.ui.unit.Dp = 48.dp,
+    iconSize: androidx.compose.ui.unit.Dp = 32.dp
 ) {
     val (icon, color) = when (status) {
         PurchaseStatus.NONE -> Icons.Default.RadioButtonUnchecked to Color.Gray
@@ -372,14 +420,14 @@ fun StatusButton(
     IconButton(
         onClick = onClick,
         modifier = modifier
-            .size(48.dp)
+            .size(size)
             .clip(CircleShape)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = status.displayName,
             tint = color,
-            modifier = Modifier.size(32.dp)
+            modifier = Modifier.size(iconSize)
         )
     }
 }

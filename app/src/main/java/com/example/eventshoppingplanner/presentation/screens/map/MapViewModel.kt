@@ -284,24 +284,23 @@ class MapViewModel @Inject constructor(
     }
 
     /**
-     * マップデータをDBに保存
+     * 既存マップデータをDBに更新保存（ブロック定義変更等）
+     *
+     * 注意: saveMapData() は insertAll(REPLACE) を使用するが、
+     * Room の REPLACE は内部的に DELETE → INSERT で実装されている。
+     * hall_definitions テーブルには map_data への ForeignKey(CASCADE) があるため、
+     * REPLACE 時に hall_definitions の子レコードが全削除されてしまう。
+     *
+     * 既存レコードの更新には updateMapData(@Update) を使用することで回避する。
      */
     private fun saveMapDataToDb(mapDataList: Map<String, DayMapData>) {
         viewModelScope.launch {
             try {
-                Log.d("MapViewModel", "saveMapDataToDb: START - saving ${mapDataList.size} maps for eventId=$eventId")
-                mapDataList.forEach { (key, _) ->
-                    Log.d("MapViewModel", "saveMapDataToDb: key=$key")
+                Log.d("MapViewModel", "saveMapDataToDb: START - updating ${mapDataList.size} maps for eventId=$eventId")
+                mapDataList.forEach { (_, mapData) ->
+                    mapDataRepository.updateMapData(mapData)
                 }
-                mapDataRepository.saveMapData(eventId, mapDataList)
-                Log.d("MapViewModel", "saveMapDataToDb: save completed, now verifying...")
-
-                // 保存確認
-                val verify = mapDataRepository.getMapDataByEventIdOnce(eventId)
-                Log.d("MapViewModel", "saveMapDataToDb: VERIFY - found ${verify.size} maps after save")
-                verify.forEach { (key, _) ->
-                    Log.d("MapViewModel", "saveMapDataToDb: VERIFY key=$key")
-                }
+                Log.d("MapViewModel", "saveMapDataToDb: update completed")
             } catch (e: Exception) {
                 Log.e("MapViewModel", "saveMapDataToDb: error", e)
             }

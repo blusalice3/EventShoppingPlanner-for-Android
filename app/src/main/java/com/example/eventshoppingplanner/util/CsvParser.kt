@@ -353,19 +353,29 @@ object CsvParser {
      * アイテムの一意キーを生成する（WEB版 getItemKey 移植）。
      * 配置情報の紐付けに使用。
      */
-    private fun getItemKey(item: ShoppingItem): String {
+    fun getItemKey(item: ShoppingItem): String {
         return "${item.circle}|${item.eventDate}|${item.block}|${item.number}|${item.title}"
     }
 
     // =========================================================================
-    // エクスポート（既存のまま）
+    // エクスポート（実行列・候補リストの順序を正しく出力）
     // =========================================================================
 
+    /**
+     * CSVエクスポート
+     * @param outputStream 出力先ストリーム
+     * @param items 全アイテム
+     * @param executeListItemIds 参加日ごとの実行列アイテムID順序
+     */
     fun exportToOutputStream(
         outputStream: OutputStream,
-        items: List<ShoppingItem>
+        items: List<ShoppingItem>,
+        executeListItemIds: Map<String, List<String>> = emptyMap()
     ): Result<Unit> {
         return try {
+            // 実行列と候補リストに分け、それぞれ順序付けする
+            val itemsWithLayout = buildItemsWithLayout(items, executeListItemIds)
+
             outputStream.bufferedWriter().use { writer ->
                 CSVPrinter(
                     writer,
@@ -377,7 +387,7 @@ object CsvParser {
                         )
                         .build()
                 ).use { printer ->
-                    items.forEach { item ->
+                    itemsWithLayout.forEach { (item, columnType, order) ->
                         printer.printRecord(
                             item.circle,
                             item.eventDate,
@@ -388,8 +398,8 @@ object CsvParser {
                             item.purchaseStatus.name,
                             item.quantity,
                             item.remarks,
-                            if (item.isInExecuteList) "実行列" else "候補リスト",
-                            item.sortOrder,
+                            columnType,
+                            order,
                             item.url ?: ""
                         )
                     }
@@ -399,5 +409,48 @@ object CsvParser {
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    /**
+     * アイテムに列タイプと列内順番を付与する
+     */
+    private fun buildItemsWithLayout(
+        items: List<ShoppingItem>,
+        executeListItemIds: Map<String, List<String>>
+    ): List<Triple<ShoppingItem, String, Int>> {
+        val result = mutableListOf<Triple<ShoppingItem, String, Int>>()
+
+        // 参加日ごとにグループ化
+        val itemsByDate = items.groupBy { it.eventDate }
+
+        // 参加日をソート
+        val sortedDates = itemsByDate.keys.sortedWith(compareBy<String> {
+            val match = Regex("\\d+").find(it)
+            match?.value?.toIntOrNull() ?: 0
+        }.thenBy { it })
+
+        for (eventDate in sortedDates) {
+            val dateItems = itemsByDate[eventDate] ?: continue
+            val executeIds = executeListItemIds[eventDate] ?: emptyList()
+            val executeIdSet = executeIds.toSet()
+
+            // 実行列アイテム（順序付き）
+            val executeItems = executeIds.mapNotNull { id ->
+                dateItems.find { it.id == id }
+            }
+            executeItems.forEachIndexed { index, item ->
+                result.add(Triple(item, "実行列", index + 1))
+            }
+
+            // 候補リストアイテム（sortOrder順）
+            val candidateItems = dateItems
+                .filter { !executeIdSet.contains(it.id) }
+                .sortedBy { it.sortOrder }
+            candidateItems.forEachIndexed { index, item ->
+                result.add(Triple(item, "候補リスト", index + 1))
+            }
+        }
+
+        return result
     }
 }
