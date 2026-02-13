@@ -18,6 +18,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.RotateLeft
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -38,6 +40,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -53,6 +56,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.example.eventshoppingplanner.domain.model.*
 import com.example.eventshoppingplanner.domain.model.PurchaseStatus
 import com.example.eventshoppingplanner.util.HallUtils
+import kotlin.math.cos
+import kotlin.math.sin
 
 /**
  * 新規アイテム追加時のプリセット情報
@@ -61,6 +66,17 @@ private data class NewItemPreset(
     val eventDate: String,
     val block: String,
     val number: String
+)
+
+private data class NearbyVisitItem(
+    val item: ShoppingItem,
+    val visitIndex: Int
+)
+
+private data class SmartInsertDialogState(
+    val item: ShoppingItem,
+    val nearbyItems: List<NearbyVisitItem>,
+    val hasHallDefinition: Boolean
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,6 +95,8 @@ fun MapScreen(
     // 新規アイテム追加ダイアログの状態
     var showAddItemDialog by remember { mutableStateOf(false) }
     var newItemPreset by remember { mutableStateOf<NewItemPreset?>(null) }
+    var smartInsertEnabled by remember { mutableStateOf(true) }
+    var smartInsertDialogState by remember { mutableStateOf<SmartInsertDialogState?>(null) }
 
     // ホールアイテム数を更新（ホール定義がある場合のみ）
     LaunchedEffect(uiState.halls.size, uiState.items.size, uiState.currentMapData?.id) {
@@ -104,8 +122,32 @@ fun MapScreen(
                 items = cellInfo.items,
                 visitListItemIds = uiState.visitListItemIds,
                 onDismiss = { selectedCellInfo = null },
-                onToggleVisitList = { itemId ->
-                    viewModel.toggleVisitListItem(itemId)
+                onToggleVisitList = { item ->
+                    val isInVisitList = uiState.visitListItemIds.contains(item.id)
+                    if (isInVisitList) {
+                        viewModel.removeFromVisitList(item.id)
+                    } else {
+                        val nearbyItems = findNearbyVisitItemsForSmartInsert(
+                            addingItem = item,
+                            allItems = uiState.items,
+                            visitListItemIds = uiState.visitListItemIds
+                        )
+
+                        if (!smartInsertEnabled || nearbyItems.isEmpty()) {
+                            viewModel.addToVisitListWithHallOrder(item.id)
+                        } else {
+                            val hasHallDefinition = findHallIdForItem(
+                                item = item,
+                                mapData = uiState.currentMapData,
+                                halls = uiState.halls
+                            ) != null
+                            smartInsertDialogState = SmartInsertDialogState(
+                                item = item,
+                                nearbyItems = nearbyItems,
+                                hasHallDefinition = hasHallDefinition
+                            )
+                        }
+                    }
                 },
                 onOpenUrl = { url ->
                     val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, Uri.parse(url))
@@ -132,14 +174,40 @@ fun MapScreen(
             AddItemFromMapDialog(
                 preset = newItemPreset!!,
                 eventId = eventId,
+                visitListCount = uiState.visitListItemIds.size,
                 onDismiss = {
                     showAddItemDialog = false
                     newItemPreset = null
                 },
-                onSave = { item ->
-                    viewModel.addItem(item)
+                onSave = { item, insertPosition ->
+                    viewModel.addItem(item, insertPosition)
                     showAddItemDialog = false
                     newItemPreset = null
+                }
+            )
+        }
+
+        smartInsertDialogState?.let { dialogState ->
+            SmartInsertPositionDialog(
+                addingItem = dialogState.item,
+                nearbyItems = dialogState.nearbyItems,
+                hasHallDefinition = dialogState.hasHallDefinition,
+                onDismiss = { smartInsertDialogState = null },
+                onInsertBefore = { referenceItemId ->
+                    viewModel.addToVisitListBefore(dialogState.item.id, referenceItemId)
+                    smartInsertDialogState = null
+                },
+                onInsertAfter = { referenceItemId ->
+                    viewModel.addToVisitListAfter(dialogState.item.id, referenceItemId)
+                    smartInsertDialogState = null
+                },
+                onInsertHallEnd = {
+                    viewModel.addToVisitListWithHallOrder(dialogState.item.id)
+                    smartInsertDialogState = null
+                },
+                onInsertListEnd = {
+                    viewModel.addToVisitListAtEnd(dialogState.item.id)
+                    smartInsertDialogState = null
                 }
             )
         }
@@ -322,6 +390,18 @@ fun MapScreen(
                                         MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                                 )
                             }
+                            TextButton(
+                                onClick = { smartInsertEnabled = !smartInsertEnabled }
+                            ) {
+                                Text(
+                                    text = "SI",
+                                    color = if (smartInsertEnabled) {
+                                        Color(0xFF2E7D32)
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                                    }
+                                )
+                            }
                         }
                         // 訪問先リストボタン（マップがある場合のみ表示）
                         if (uiState.currentMapData != null) {
@@ -400,6 +480,7 @@ fun MapScreen(
                                     scale = uiState.scale,
                                     offsetX = uiState.offsetX,
                                     offsetY = uiState.offsetY,
+                                    rotationDegrees = uiState.rotationDegrees,
                                     cellItemsMap = uiState.cellItemsMap,
                                     visitListItemIds = uiState.visitListItemIds,
                                     visitPoints = uiState.visitPoints,
@@ -463,6 +544,47 @@ fun MapScreen(
                                         viewModel.removeSelectedCell(row, col)
                                     }
                                 )
+
+                                // 地図回転コントロール
+                                if (uiState.hallVertexSelectionMode != HallVertexSelectionMode.SELECTING) {
+                                    Card(
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(12.dp),
+                                        colors = CardDefaults.cardColors(
+                                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
+                                        ),
+                                        elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            IconButton(onClick = { viewModel.rotateMapBy(-90f) }) {
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Filled.RotateLeft,
+                                                    contentDescription = "左回転"
+                                                )
+                                            }
+                                            Text(
+                                                text = "${uiState.rotationDegrees.toInt()}°",
+                                                style = MaterialTheme.typography.labelLarge
+                                            )
+                                            TextButton(
+                                                onClick = { viewModel.resetMapRotation() },
+                                                enabled = uiState.rotationDegrees != 0f
+                                            ) {
+                                                Text("リセット")
+                                            }
+                                            IconButton(onClick = { viewModel.rotateMapBy(90f) }) {
+                                                Icon(
+                                                    imageVector = Icons.AutoMirrored.Filled.RotateRight,
+                                                    contentDescription = "右回転"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
 
                                 // セル選択モード中のオーバーレイ
                                 if (uiState.cellSelectionMode != CellSelectionMode.NONE) {
@@ -614,6 +736,7 @@ private fun MapCanvas(
     scale: Float,
     offsetX: Float,
     offsetY: Float,
+    rotationDegrees: Float,
     cellItemsMap: Map<String, List<ShoppingItem>>,
     visitListItemIds: List<String> = emptyList(),  // 訪問先リストに追加されたアイテムID
     visitPoints: List<VisitPoint> = emptyList(),  // 訪問ポイント（ルート描画用）
@@ -639,8 +762,8 @@ private fun MapCanvas(
     // mapData.idをキーにして、マップ切り替え時にリセット
     var gestureVersion by remember(mapData.id) { mutableStateOf(0) }
 
-    // スケール変更時にgestureVersionを更新
-    LaunchedEffect(scale) {
+    // スケール・回転変更時にgestureVersionを更新
+    LaunchedEffect(scale, rotationDegrees) {
         gestureVersion++
     }
 
@@ -766,6 +889,29 @@ private fun MapCanvas(
     // mapData.idをキーにして、マップ切り替え時にリセット
     var highlightedCell by remember(mapData.id) { mutableStateOf<Pair<Int, Int>?>(null) }
 
+    fun rotatePointAroundPivot(point: Offset, pivot: Offset, degrees: Float): Offset {
+        val radians = Math.toRadians(degrees.toDouble())
+        val cosValue = cos(radians).toFloat()
+        val sinValue = sin(radians).toFloat()
+
+        val translatedX = point.x - pivot.x
+        val translatedY = point.y - pivot.y
+
+        val rotatedX = translatedX * cosValue - translatedY * sinValue
+        val rotatedY = translatedX * sinValue + translatedY * cosValue
+        return Offset(rotatedX + pivot.x, rotatedY + pivot.y)
+    }
+
+    fun rotateVector(vector: Offset, degrees: Float): Offset {
+        val radians = Math.toRadians(degrees.toDouble())
+        val cosValue = cos(radians).toFloat()
+        val sinValue = sin(radians).toFloat()
+        return Offset(
+            x = vector.x * cosValue - vector.y * sinValue,
+            y = vector.x * sinValue + vector.y * cosValue
+        )
+    }
+
     // タップ位置からセル座標を計算する関数（ローカル値を参照）
     fun findCellAtPosition(tapX: Float, tapY: Float): Pair<Int, Int>? {
         var currentX = localOffsetX
@@ -802,10 +948,18 @@ private fun MapCanvas(
             modifier = Modifier
                 .fillMaxSize()
                 // ピンチズームとパン処理（マーカーモード中も有効）
-                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, hallBoundsPixels) {
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, hallBoundsPixels, rotationDegrees) {
                     detectTransformGestures(
                         panZoomLock = false
                     ) { centroid, pan, zoom, _ ->
+                        val pivot = Offset(size.width / 2f, size.height / 2f)
+                        val unrotatedCentroid = rotatePointAroundPivot(
+                            point = centroid,
+                            pivot = pivot,
+                            degrees = -rotationDegrees
+                        )
+                        val unrotatedPan = rotateVector(pan, -rotationDegrees)
+
                         if (zoom != 1f) {
                             // ピンチズーム処理
                             val newScale = (localScale * zoom).coerceIn(0.1f, 5.0f)
@@ -813,8 +967,8 @@ private fun MapCanvas(
                             // ピンチの中心点を基準にズーム
                             // 中心点がスケール前後で同じ位置に留まるようにオフセットを調整
                             val scaleChange = newScale / localScale
-                            var newOffsetX = centroid.x - (centroid.x - localOffsetX) * scaleChange
-                            var newOffsetY = centroid.y - (centroid.y - localOffsetY) * scaleChange
+                            var newOffsetX = unrotatedCentroid.x - (unrotatedCentroid.x - localOffsetX) * scaleChange
+                            var newOffsetY = unrotatedCentroid.y - (unrotatedCentroid.y - localOffsetY) * scaleChange
 
                             // ホール選択時のズーム後オフセット制限
                             if (hallBoundsPixels != null) {
@@ -860,8 +1014,8 @@ private fun MapCanvas(
                             onPinchZoom(localScale, localOffsetX, localOffsetY)
                         } else if (pan.x != 0f || pan.y != 0f) {
                             // パン処理
-                            var newOffsetX = localOffsetX + pan.x
-                            var newOffsetY = localOffsetY + pan.y
+                            var newOffsetX = localOffsetX + unrotatedPan.x
+                            var newOffsetY = localOffsetY + unrotatedPan.y
 
                             // ホール選択時のパン制限
                             if (hallBoundsPixels != null) {
@@ -907,12 +1061,18 @@ private fun MapCanvas(
                     }
                 }
                 // タップ処理（別のpointerInputで処理）
-                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, isHallVertexSelectionMode) {
+                .pointerInput(selectedCellsSet, isSelectionMode, gestureVersion, isHallVertexSelectionMode, rotationDegrees) {
                     detectTapGestures { position ->
                         // マーカーモード中はタップ処理しない
                         if (isHallVertexSelectionMode) return@detectTapGestures
 
-                        val cellPos = findCellAtPosition(position.x, position.y)
+                        val pivot = Offset(size.width / 2f, size.height / 2f)
+                        val unrotatedPosition = rotatePointAroundPivot(
+                            point = position,
+                            pivot = pivot,
+                            degrees = -rotationDegrees
+                        )
+                        val cellPos = findCellAtPosition(unrotatedPosition.x, unrotatedPosition.y)
                         cellPos?.let { (row, col) ->
                             // 結合セルの場合は開始セルを使用
                             val mergedInfo = mergeMap["$row-$col"]
@@ -933,38 +1093,42 @@ private fun MapCanvas(
         ) {
             val canvasWidth = size.width
             val canvasHeight = size.height
+            val rotationPivot = Offset(size.width / 2f, size.height / 2f)
 
-            // 描画開始位置（ローカル値を使用）
-            val startX = localOffsetX
-            val startY = localOffsetY
-            val drawScale = localScale
+            withTransform({
+                rotate(degrees = rotationDegrees, pivot = rotationPivot)
+            }) {
+                // 描画開始位置（ローカル値を使用）
+                val startX = localOffsetX
+                val startY = localOffsetY
+                val drawScale = localScale
 
-            // 各セルの位置を計算するためのヘルパー関数
-            fun getColumnX(col: Int): Float {
-                var x = startX
-                for (c in 1 until col) {
-                    val width = mapData.columnWidths[c] ?: mapData.defaultColumnWidth
-                    x += width * drawScale
+                // 各セルの位置を計算するためのヘルパー関数
+                fun getColumnX(col: Int): Float {
+                    var x = startX
+                    for (c in 1 until col) {
+                        val width = mapData.columnWidths[c] ?: mapData.defaultColumnWidth
+                        x += width * drawScale
+                    }
+                    return x
                 }
-                return x
-            }
 
-            fun getRowY(row: Int): Float {
-                var y = startY
-                for (r in 1 until row) {
-                    val height = mapData.rowHeights[r] ?: mapData.defaultRowHeight
-                    y += height * drawScale
+                fun getRowY(row: Int): Float {
+                    var y = startY
+                    for (r in 1 until row) {
+                        val height = mapData.rowHeights[r] ?: mapData.defaultRowHeight
+                        y += height * drawScale
+                    }
+                    return y
                 }
-                return y
-            }
 
-            fun getColumnWidth(col: Int): Float {
-                return (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * drawScale
-            }
+                fun getColumnWidth(col: Int): Float {
+                    return (mapData.columnWidths[col] ?: mapData.defaultColumnWidth) * drawScale
+                }
 
-            fun getRowHeight(row: Int): Float {
-                return (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * drawScale
-            }
+                fun getRowHeight(row: Int): Float {
+                    return (mapData.rowHeights[row] ?: mapData.defaultRowHeight) * drawScale
+                }
 
             // 描画範囲を計算
             var currentX = startX
@@ -987,11 +1151,11 @@ private fun MapCanvas(
             // セルを描画
             for (row in maxOf(1, startRow - 5)..minOf(mapData.maxRow, startRow + 200)) {
                 val y = getRowY(row)
-                if (y > canvasHeight + 100) break
+                if (y > canvasHeight + 300) break
 
                 for (col in maxOf(1, startCol - 5)..minOf(mapData.maxCol, startCol + 300)) {
                     val x = getColumnX(col)
-                    if (x > canvasWidth + 100) break
+                    if (x > canvasWidth + 300) break
 
                     // ホール選択時はホール外のセルをスキップ
                     if (!isInSelectedHall(row, col)) continue
@@ -1080,9 +1244,14 @@ private fun MapCanvas(
                                     }
 
                                     val textX = x + mergedWidth / 2
-                                    val textY = y + mergedHeight / 2 + fontSize / 3
-
-                                    drawText(value.toString(), textX, textY, paint)
+                                    val textCenterY = y + mergedHeight / 2
+                                    val textBaselineY = textCenterY + fontSize / 3
+                                    save()
+                                    if (rotationDegrees != 0f) {
+                                        rotate(-rotationDegrees, textX, textCenterY)
+                                    }
+                                    drawText(value.toString(), textX, textBaselineY, paint)
+                                    restore()
                                 }
                             }
 
@@ -1199,9 +1368,14 @@ private fun MapCanvas(
                                 }
 
                                 val textX = x + cellWidth / 2
-                                val textY = y + cellHeight / 2 + fontSize / 3
-
-                                drawText(value.toString(), textX, textY, paint)
+                                val textCenterY = y + cellHeight / 2
+                                val textBaselineY = textCenterY + fontSize / 3
+                                save()
+                                if (rotationDegrees != 0f) {
+                                    rotate(-rotationDegrees, textX, textCenterY)
+                                }
+                                drawText(value.toString(), textX, textBaselineY, paint)
+                                restore()
                             }
                         }
 
@@ -1543,6 +1717,7 @@ private fun MapCanvas(
                         }
                     }
                 }
+            }
             }
         }
     }
@@ -2014,7 +2189,7 @@ private fun CellItemsDialog(
     items: List<ShoppingItem>,
     visitListItemIds: List<String>,
     onDismiss: () -> Unit,
-    onToggleVisitList: (String) -> Unit,
+    onToggleVisitList: (ShoppingItem) -> Unit,
     onOpenUrl: (String) -> Unit,
     onAddNewItem: (() -> Unit)? = null
 ) {
@@ -2091,7 +2266,7 @@ private fun CellItemsDialog(
                             CellItemRow(
                                 item = item,
                                 isInVisitList = visitListItemIds.contains(item.id),
-                                onToggleVisitList = { onToggleVisitList(item.id) },
+                                onToggleVisitList = { onToggleVisitList(item) },
                                 onOpenUrl = {
                                     item.url?.let { onOpenUrl(it) }
                                 }
@@ -2201,7 +2376,148 @@ private fun CellItemRow(
     }
 }
 
+@Composable
+private fun SmartInsertPositionDialog(
+    addingItem: ShoppingItem,
+    nearbyItems: List<NearbyVisitItem>,
+    hasHallDefinition: Boolean,
+    onDismiss: () -> Unit,
+    onInsertBefore: (String) -> Unit,
+    onInsertAfter: (String) -> Unit,
+    onInsertHallEnd: () -> Unit,
+    onInsertListEnd: () -> Unit
+) {
+    val sortedNearbyItems = remember(nearbyItems) {
+        nearbyItems.sortedBy { it.visitIndex }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("追加位置を選択") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    text = "${addingItem.block}-${addingItem.number}${if (addingItem.circle.isNotBlank()) " (${addingItem.circle})" else ""}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                sortedNearbyItems.forEach { nearby ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                        )
+                    ) {
+                        Column(modifier = Modifier.padding(8.dp)) {
+                            Text(
+                                text = "#${nearby.visitIndex + 1} ${nearby.item.block}-${nearby.item.number}",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            if (nearby.item.circle.isNotBlank()) {
+                                Text(
+                                    text = nearby.item.circle,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                TextButton(onClick = { onInsertBefore(nearby.item.id) }) {
+                                    Text("この上に追加")
+                                }
+                                TextButton(onClick = { onInsertAfter(nearby.item.id) }) {
+                                    Text("この下に追加")
+                                }
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider()
+
+                if (hasHallDefinition) {
+                    TextButton(
+                        onClick = onInsertHallEnd,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("同ホールの末尾に追加")
+                    }
+                }
+                TextButton(
+                    onClick = onInsertListEnd,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("リスト末尾に追加")
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("キャンセル")
+            }
+        }
+    )
+}
+
 // ===== ヘルパー関数 =====
+
+private fun findNearbyVisitItemsForSmartInsert(
+    addingItem: ShoppingItem,
+    allItems: List<ShoppingItem>,
+    visitListItemIds: List<String>
+): List<NearbyVisitItem> {
+    val addingNumber = extractNumberFromItemNumber(addingItem.number) ?: return emptyList()
+    val addingBlock = addingItem.block.trim().lowercase()
+    if (addingBlock.isBlank()) return emptyList()
+
+    val itemsMap = allItems.associateBy { it.id }
+    val nearby = mutableListOf<NearbyVisitItem>()
+
+    visitListItemIds.forEachIndexed { index, existingId ->
+        val existingItem = itemsMap[existingId] ?: return@forEachIndexed
+        val existingBlock = existingItem.block.trim().lowercase()
+        if (existingBlock != addingBlock) return@forEachIndexed
+
+        val existingNumber = extractNumberFromItemNumber(existingItem.number) ?: return@forEachIndexed
+        if (kotlin.math.abs(existingNumber - addingNumber) <= 3) {
+            nearby.add(NearbyVisitItem(item = existingItem, visitIndex = index))
+        }
+    }
+
+    return nearby
+}
+
+private fun findHallIdForItem(
+    item: ShoppingItem,
+    mapData: DayMapData?,
+    halls: List<HallDefinition>
+): String? {
+    if (mapData == null || halls.isEmpty()) return null
+
+    val blockName = item.block.trim()
+    val block = mapData.blocks.find { it.name == blockName }
+        ?: mapData.blocks.find { it.name.equals(blockName, ignoreCase = true) }
+        ?: return null
+
+    val centerRow = (block.startRow + block.endRow) / 2f
+    val centerCol = (block.startCol + block.endCol) / 2f
+
+    for (hall in halls) {
+        if (hall.vertices.size >= 3 && HallUtils.isPointInPolygon(centerRow, centerCol, hall.vertices)) {
+            return hall.id
+        }
+    }
+    return null
+}
 
 /**
  * セルがブロックの範囲内にあるかチェック（cellGroups対応）
@@ -2268,8 +2584,9 @@ private fun extractNumberFromItemNumber(itemNumber: String): Int? {
 private fun AddItemFromMapDialog(
     preset: NewItemPreset,
     eventId: String,
+    visitListCount: Int,
     onDismiss: () -> Unit,
-    onSave: (ShoppingItem) -> Unit
+    onSave: (ShoppingItem, MapInsertPosition) -> Unit
 ) {
     // 入力状態（プリセット値で初期化）
     var circle by remember { mutableStateOf("") }
@@ -2285,6 +2602,9 @@ private fun AddItemFromMapDialog(
     // ドロップダウン展開状態
     var priceExpanded by remember { mutableStateOf(false) }
     var quantityExpanded by remember { mutableStateOf(false) }
+
+    // 訪問先への追加設定
+    var insertPosition by remember { mutableStateOf(MapInsertPosition.SMART) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2443,6 +2763,49 @@ private fun AddItemFromMapDialog(
                     }
                 }
 
+                // 訪問先リストへの挿入位置（常時表示）
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = "訪問先リストへの挿入位置",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "現在 ${visitListCount} 件",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        FilterChip(
+                            selected = insertPosition == MapInsertPosition.SMART,
+                            onClick = { insertPosition = MapInsertPosition.SMART },
+                            label = { Text("スマート") }
+                        )
+                        FilterChip(
+                            selected = insertPosition == MapInsertPosition.HEAD,
+                            onClick = { insertPosition = MapInsertPosition.HEAD },
+                            label = { Text("先頭") }
+                        )
+                        FilterChip(
+                            selected = insertPosition == MapInsertPosition.TAIL,
+                            onClick = { insertPosition = MapInsertPosition.TAIL },
+                            label = { Text("末尾") }
+                        )
+                    }
+
+                    FilterChip(
+                        selected = insertPosition == MapInsertPosition.NONE,
+                        onClick = { insertPosition = MapInsertPosition.NONE },
+                        label = { Text("訪問先に追加しない") }
+                    )
+                }
+
                 // 備考
                 OutlinedTextField(
                     value = remarks,
@@ -2482,7 +2845,7 @@ private fun AddItemFromMapDialog(
                         sortOrder = 0,
                         isInExecuteList = false
                     )
-                    onSave(newItem)
+                    onSave(newItem, insertPosition)
                 },
                 enabled = circle.isNotBlank() && eventDate.isNotBlank() && block.isNotBlank() && number.isNotBlank()
             ) {

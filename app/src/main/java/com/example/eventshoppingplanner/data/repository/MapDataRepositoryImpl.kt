@@ -3,6 +3,7 @@ package com.example.eventshoppingplanner.data.repository
 import android.util.Base64
 import android.util.Log
 import com.example.eventshoppingplanner.data.local.dao.MapDataDao
+import com.example.eventshoppingplanner.data.local.dao.MapDataMeta
 import com.example.eventshoppingplanner.data.local.entity.MapDataEntity
 import com.example.eventshoppingplanner.domain.model.DayMapData
 import com.example.eventshoppingplanner.domain.repository.MapDataRepository
@@ -21,6 +22,8 @@ class MapDataRepositoryImpl @Inject constructor(
 ) : MapDataRepository {
 
     private val gson: Gson = GsonBuilder().create()
+    private val tag = "MapDataRepo"
+    private val jsonChunkSize = 200_000
 
     /**
      * JSONをGZIP圧縮してBase64エンコード
@@ -52,56 +55,93 @@ class MapDataRepositoryImpl @Inject constructor(
         return !data.trimStart().startsWith("{")
     }
 
+    /**
+     * CursorWindow 上限回避のため jsonData を分割取得する
+     */
+    private suspend fun readJsonDataByChunks(id: String): String? {
+        val totalLength = mapDataDao.getJsonDataLength(id) ?: return null
+        if (totalLength <= 0) return ""
+
+        val builder = StringBuilder(totalLength)
+        var start = 1 // SQLite SUBSTR は 1-indexed
+
+        while (start <= totalLength) {
+            val length = minOf(jsonChunkSize, totalLength - start + 1)
+            val chunk = mapDataDao.getJsonDataChunk(id, start, length) ?: return null
+            if (chunk.isEmpty()) break
+            builder.append(chunk)
+            start += chunk.length
+        }
+
+        return builder.toString()
+    }
+
+    private fun parseDayMapData(entityId: String, storedJsonData: String): DayMapData {
+        val jsonData = if (isCompressed(storedJsonData)) {
+            decompress(storedJsonData)
+        } else {
+            storedJsonData
+        }
+        val mapData = gson.fromJson(jsonData, DayMapData::class.java)
+        return if (mapData.id.isNotEmpty() && !mapData.id.startsWith("00000000")) {
+            mapData
+        } else {
+            mapData.copy(id = entityId)
+        }
+    }
+
+    private suspend fun loadMapDataByMeta(meta: MapDataMeta): DayMapData? {
+        val stored = readJsonDataByChunks(meta.id)
+        if (stored == null) {
+            Log.e(tag, "loadMapDataByMeta: failed to read jsonData, id=${meta.id}")
+            return null
+        }
+        return try {
+            parseDayMapData(meta.id, stored)
+        } catch (e: Exception) {
+            Log.e(tag, "loadMapDataByMeta: failed to parse, id=${meta.id}, dayName=${meta.dayName}", e)
+            null
+        }
+    }
+
     override fun getMapDataByEventId(eventId: String): Flow<Map<String, DayMapData>> {
-        return mapDataDao.getMapDataByEventId(eventId).map { entities ->
-            Log.d("MapDataRepo", "getMapDataByEventId: found ${entities.size} entities")
-            entities.associate { entity ->
-                val jsonData = if (isCompressed(entity.jsonData)) {
-                    decompress(entity.jsonData)
-                } else {
-                    entity.jsonData
+        return mapDataDao.getMapDataMetaByEventIdFlow(eventId).map { metas ->
+            Log.d(tag, "getMapDataByEventId: found ${metas.size} meta rows")
+            buildMap {
+                metas.forEach { meta ->
+                    val mapData = loadMapDataByMeta(meta)
+                    if (mapData != null) {
+                        put(meta.dayName, mapData)
+                    }
                 }
-                val mapData = gson.fromJson(jsonData, DayMapData::class.java)
-                // mapData.idがない（古いデータ）場合はentity.idを使用
-                val mapDataWithId = if (mapData.id.isNotEmpty() && !mapData.id.startsWith("00000000")) {
-                    mapData
-                } else {
-                    mapData.copy(id = entity.id)
-                }
-                entity.dayName to mapDataWithId
             }
         }
     }
 
     override suspend fun getMapDataByEventIdOnce(eventId: String): Map<String, DayMapData> {
-        Log.d("MapDataRepo", "getMapDataByEventIdOnce: eventId=$eventId")
-        val entities = mapDataDao.getMapDataByEventIdOnce(eventId)
-        Log.d("MapDataRepo", "getMapDataByEventIdOnce: found ${entities.size} entities")
-        return entities.associate { entity ->
-            val jsonData = if (isCompressed(entity.jsonData)) {
-                decompress(entity.jsonData)
-            } else {
-                entity.jsonData
+        Log.d(tag, "getMapDataByEventIdOnce: eventId=$eventId")
+        val metas = mapDataDao.getMapDataMetaByEventId(eventId)
+        Log.d(tag, "getMapDataByEventIdOnce: found ${metas.size} meta rows")
+        return buildMap {
+            metas.forEach { meta ->
+                val mapData = loadMapDataByMeta(meta)
+                if (mapData != null) {
+                    Log.d(tag, "  - dayName=${meta.dayName}, id=${meta.id}, mapData.id=${mapData.id}")
+                    put(meta.dayName, mapData)
+                } else {
+                    Log.w(tag, "  - skipped unreadable map data: id=${meta.id}, dayName=${meta.dayName}")
+                }
             }
-            val mapData = gson.fromJson(jsonData, DayMapData::class.java)
-            // mapData.idがない（古いデータ）場合はentity.idを使用
-            val mapDataWithId = if (mapData.id.isNotEmpty() && !mapData.id.startsWith("00000000")) {
-                mapData
-            } else {
-                mapData.copy(id = entity.id)
-            }
-            Log.d("MapDataRepo", "  - dayName=${entity.dayName}, entity.id=${entity.id}, mapData.id=${mapDataWithId.id}")
-            entity.dayName to mapDataWithId
         }
     }
 
     override suspend fun saveMapData(eventId: String, mapDataList: Map<String, DayMapData>) {
-        Log.d("MapDataRepo", "saveMapData: eventId=$eventId, count=${mapDataList.size}")
+        Log.d(tag, "saveMapData: eventId=$eventId, count=${mapDataList.size}")
         val entities = mapDataList.map { (dayName, mapData) ->
             val json = gson.toJson(mapData)
             val compressed = compress(json)
             // mapData.idを使用して、XlsxMapParserで設定されたIDと一致させる
-            Log.d("MapDataRepo", "  - dayName=$dayName, mapData.id=${mapData.id}, original=${json.length}, compressed=${compressed.length}")
+            Log.d(tag, "  - dayName=$dayName, mapData.id=${mapData.id}, original=${json.length}, compressed=${compressed.length}")
             MapDataEntity(
                 id = mapData.id,  // mapData.idをそのまま使用
                 eventId = eventId,
@@ -112,7 +152,7 @@ class MapDataRepositoryImpl @Inject constructor(
             )
         }
         mapDataDao.insertAll(entities)
-        Log.d("MapDataRepo", "saveMapData: insertAll completed")
+        Log.d(tag, "saveMapData: insertAll completed")
     }
 
     override suspend fun updateMapData(mapData: DayMapData) {

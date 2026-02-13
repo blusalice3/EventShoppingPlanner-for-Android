@@ -13,6 +13,9 @@ interface DayModeDao {
     @Query("SELECT * FROM day_modes WHERE eventId = :eventId")
     fun getDayModesByEventId(eventId: String): Flow<List<DayModeEntity>>
 
+    @Query("SELECT * FROM day_modes WHERE eventId = :eventId")
+    suspend fun getDayModesByEventIdOnce(eventId: String): List<DayModeEntity>
+
     @Query("SELECT * FROM day_modes WHERE eventId = :eventId AND eventDate = :eventDate")
     suspend fun getDayMode(eventId: String, eventDate: String): DayModeEntity?
 

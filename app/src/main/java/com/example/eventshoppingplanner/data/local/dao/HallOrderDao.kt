@@ -19,6 +19,9 @@ interface HallOrderDao {
     @Query("SELECT * FROM hall_orders WHERE eventId = :eventId")
     fun getHallOrdersByEventId(eventId: String): Flow<List<HallOrderEntity>>
 
+    @Query("SELECT * FROM hall_orders WHERE eventId = :eventId")
+    suspend fun getHallOrdersByEventIdOnce(eventId: String): List<HallOrderEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertHallOrder(hallOrder: HallOrderEntity)
 

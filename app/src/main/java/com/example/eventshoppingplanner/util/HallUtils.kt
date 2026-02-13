@@ -70,22 +70,6 @@ object HallUtils {
     }
 
     /**
-     * 外積（反時計回りなら正、時計回りなら負）
-     */
-    private fun crossProduct(o: Vertex, a: Vertex, b: Vertex): Int {
-        return (a.col - o.col) * (b.row - o.row) - (a.row - o.row) * (b.col - o.col)
-    }
-
-    /**
-     * 2点間の距離の2乗
-     */
-    private fun distanceSquared(a: Vertex, b: Vertex): Int {
-        val dx = b.col - a.col
-        val dy = b.row - a.row
-        return dx * dx + dy * dy
-    }
-
-    /**
      * 点が多角形内にあるか判定（Ray Casting Algorithm）
      * @param row 判定する点の行
      * @param col 判定する点の列

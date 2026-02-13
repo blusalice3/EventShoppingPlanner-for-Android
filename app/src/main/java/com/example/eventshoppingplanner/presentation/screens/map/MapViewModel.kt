@@ -45,6 +45,7 @@ data class MapUiState(
     val scale: Float = 1.0f,
     val offsetX: Float = 0f,
     val offsetY: Float = 0f,
+    val rotationDegrees: Float = 0f,
     val errorMessage: String? = null,
     val cellItemsMap: Map<String, List<ShoppingItem>> = emptyMap(),
     // ブロック編集関連
@@ -118,6 +119,16 @@ data class HallEditState(
 enum class HallVertexSelectionMode {
     NONE,
     SELECTING
+}
+
+/**
+ * マップから追加したアイテムの訪問先挿入位置
+ */
+enum class MapInsertPosition {
+    NONE,   // 訪問先に追加しない
+    HEAD,   // 先頭
+    TAIL,   // 末尾
+    SMART   // 最短経路推定
 }
 
 /**
@@ -322,6 +333,7 @@ class MapViewModel @Inject constructor(
                 scale = 1.0f,
                 offsetX = 0f,
                 offsetY = 0f,
+                rotationDegrees = 0f,
                 // ホール関連をリセット
                 selectedHallId = null,
                 halls = emptyList(),
@@ -647,14 +659,157 @@ class MapViewModel @Inject constructor(
      * アイテムを訪問先リストに追加
      */
     fun addToVisitList(itemId: String) {
+        addToVisitListAtEnd(itemId)
+    }
+
+    /**
+     * アイテムを訪問先リストの末尾に追加
+     */
+    fun addToVisitListAtEnd(itemId: String) {
+        insertIntoVisitList(itemId, _uiState.value.visitListItemIds.size, "listEnd")
+    }
+
+    /**
+     * アイテムを参照アイテムの前に挿入
+     */
+    fun addToVisitListBefore(itemId: String, referenceItemId: String) {
+        val currentIds = _uiState.value.visitListItemIds
+        val refIndex = currentIds.indexOf(referenceItemId)
+        if (refIndex < 0) {
+            addToVisitListAtEnd(itemId)
+            return
+        }
+        insertIntoVisitList(itemId, refIndex, "before")
+    }
+
+    /**
+     * アイテムを参照アイテムの後に挿入
+     */
+    fun addToVisitListAfter(itemId: String, referenceItemId: String) {
+        val currentIds = _uiState.value.visitListItemIds
+        val refIndex = currentIds.indexOf(referenceItemId)
+        if (refIndex < 0) {
+            addToVisitListAtEnd(itemId)
+            return
+        }
+        insertIntoVisitList(itemId, refIndex + 1, "after")
+    }
+
+    /**
+     * Web版の onAddToExecuteListFromMap 相当:
+     * 同ホール末尾 / 後続ホール先頭の位置に挿入
+     */
+    fun addToVisitListWithHallOrder(itemId: String) {
+        val state = _uiState.value
+        val currentIds = state.visitListItemIds
+        if (currentIds.contains(itemId)) return
+
+        val insertIndex = resolveHallAwareInsertIndex(itemId, currentIds)
+        insertIntoVisitList(itemId, insertIndex, "hallEnd")
+    }
+
+    private fun insertIntoVisitList(itemId: String, index: Int, mode: String) {
         val currentIds = _uiState.value.visitListItemIds
         if (currentIds.contains(itemId)) return
 
-        _uiState.update { it.copy(visitListItemIds = currentIds + itemId) }
+        val newIds = currentIds.toMutableList()
+        val insertIndex = index.coerceIn(0, newIds.size)
+        newIds.add(insertIndex, itemId)
+
+        _uiState.update { it.copy(visitListItemIds = newIds) }
         saveVisitList()
         updateHallItemCounts()
         generateRouteData()
-        Log.d("MapViewModel", "addToVisitList: added itemId=$itemId")
+        Log.d("MapViewModel", "addToVisitList($mode): itemId=$itemId, index=$insertIndex")
+    }
+
+    private fun resolveHallAwareInsertIndex(itemId: String, currentIds: List<String>): Int {
+        val state = _uiState.value
+        val mapData = state.currentMapData ?: return currentIds.size
+        val halls = state.halls
+        if (halls.isEmpty()) return currentIds.size
+
+        val itemsMap = state.items.associateBy { it.id }
+        val targetItem = itemsMap[itemId] ?: return currentIds.size
+        val hallOrder = getHallOrderForSmartInsert(state, halls)
+        return resolveHallAwareInsertIndexForItem(
+            targetItem = targetItem,
+            currentIds = currentIds,
+            itemsMap = itemsMap,
+            mapData = mapData,
+            halls = halls,
+            hallOrder = hallOrder
+        )
+    }
+
+    private fun resolveHallAwareInsertIndexForItem(
+        targetItem: ShoppingItem,
+        currentIds: List<String>,
+        itemsMap: Map<String, ShoppingItem>,
+        mapData: DayMapData,
+        halls: List<HallDefinition>,
+        hallOrder: List<String>
+    ): Int {
+        val targetHallId = getHallIdForItem(targetItem, mapData, halls) ?: return currentIds.size
+        val targetHallIndex = hallOrder.indexOf(targetHallId)
+        if (targetHallIndex < 0) return currentIds.size
+
+        var lastSameHallIndex = -1
+        var firstLaterHallIndex = -1
+
+        for (i in currentIds.indices) {
+            val existingItem = itemsMap[currentIds[i]] ?: continue
+            val existingHallId = getHallIdForItem(existingItem, mapData, halls) ?: continue
+
+            if (existingHallId == targetHallId) {
+                lastSameHallIndex = i
+            } else {
+                val existingHallIndex = hallOrder.indexOf(existingHallId)
+                if (existingHallIndex > targetHallIndex && firstLaterHallIndex == -1) {
+                    firstLaterHallIndex = i
+                }
+            }
+        }
+
+        return when {
+            lastSameHallIndex >= 0 -> lastSameHallIndex + 1
+            firstLaterHallIndex >= 0 -> firstLaterHallIndex
+            else -> currentIds.size
+        }
+    }
+
+    private fun getHallOrderForSmartInsert(state: MapUiState, halls: List<HallDefinition>): List<String> {
+        val fromGroupOrder = state.groupOrder
+            .mapNotNull { groupId -> parseGroupId(groupId).first }
+            .distinct()
+            .filter { hallId -> halls.any { it.id == hallId } }
+
+        return if (fromGroupOrder.isNotEmpty()) {
+            fromGroupOrder
+        } else {
+            halls.map { it.id }
+        }
+    }
+
+    private fun getHallIdForItem(
+        item: ShoppingItem,
+        mapData: DayMapData,
+        halls: List<HallDefinition>
+    ): String? {
+        val blockName = item.block.trim()
+        val block = mapData.blocks.find { it.name == blockName }
+            ?: mapData.blocks.find { it.name.equals(blockName, ignoreCase = true) }
+            ?: return null
+
+        val centerRow = (block.startRow + block.endRow) / 2f
+        val centerCol = (block.startCol + block.endCol) / 2f
+
+        for (hall in halls) {
+            if (hall.vertices.size >= 3 && HallUtils.isPointInPolygon(centerRow, centerCol, hall.vertices)) {
+                return hall.id
+            }
+        }
+        return null
     }
 
     /**
@@ -967,6 +1122,21 @@ class MapViewModel @Inject constructor(
         _uiState.update { it.copy(offsetX = x, offsetY = y) }
     }
 
+    fun rotateMapBy(deltaDegrees: Float) {
+        _uiState.update {
+            it.copy(rotationDegrees = normalizeRotation(it.rotationDegrees + deltaDegrees))
+        }
+    }
+
+    fun resetMapRotation() {
+        _uiState.update { it.copy(rotationDegrees = 0f) }
+    }
+
+    private fun normalizeRotation(degrees: Float): Float {
+        val normalized = degrees % 360f
+        return if (normalized < 0f) normalized + 360f else normalized
+    }
+
     // ===== マーカー関連（Google Maps風配置方式） =====
 
     /**
@@ -1062,13 +1232,68 @@ class MapViewModel @Inject constructor(
         }
     }
 
-    fun addItem(item: ShoppingItem) {
+    fun addItem(item: ShoppingItem, insertPosition: MapInsertPosition = MapInsertPosition.NONE) {
         viewModelScope.launch {
             // eventIdを設定してアイテムを追加
             val eventId = _uiState.value.event?.id ?: return@launch
             val itemWithEventId = item.copy(eventId = eventId)
             itemRepository.insertItem(itemWithEventId)
+
+            if (insertPosition != MapInsertPosition.NONE) {
+                insertItemIntoVisitList(itemWithEventId, insertPosition)
+            }
         }
+    }
+
+    private fun insertItemIntoVisitList(item: ShoppingItem, insertPosition: MapInsertPosition) {
+        val state = _uiState.value
+        val mapData = state.currentMapData ?: return
+        val dayName = mapData.dayName
+
+        // 現在表示中のマップ日付と異なる場合は挿入しない
+        if (item.eventDate != dayName) {
+            Log.d(
+                "MapViewModel",
+                "insertItemIntoVisitList: skipped because eventDate=${item.eventDate} != dayName=$dayName"
+            )
+            return
+        }
+
+        val currentIds = state.visitListItemIds.toMutableList()
+        if (currentIds.contains(item.id)) return
+
+        val insertIndex = when (insertPosition) {
+            MapInsertPosition.NONE -> return
+            MapInsertPosition.HEAD -> 0
+            MapInsertPosition.TAIL -> currentIds.size
+            MapInsertPosition.SMART -> {
+                val halls = state.halls
+                if (halls.isEmpty()) {
+                    currentIds.size
+                } else {
+                    val itemsMap = (state.items + item).associateBy { it.id }
+                    val hallOrder = getHallOrderForSmartInsert(state, halls)
+                    resolveHallAwareInsertIndexForItem(
+                        targetItem = item,
+                        currentIds = currentIds,
+                        itemsMap = itemsMap,
+                        mapData = mapData,
+                        halls = halls,
+                        hallOrder = hallOrder
+                    )
+                }
+            }
+        }.coerceIn(0, currentIds.size)
+
+        currentIds.add(insertIndex, item.id)
+        _uiState.update { it.copy(visitListItemIds = currentIds) }
+        saveVisitList()
+        updateHallItemCounts()
+        generateRouteData()
+        Log.d(
+            "MapViewModel",
+            "insertItemIntoVisitList: itemId=${item.id}, mode=$insertPosition, index=$insertIndex"
+        )
     }
 
     // ===== ブロック定義パネル関連 =====
@@ -1511,6 +1736,7 @@ class MapViewModel @Inject constructor(
                 isPlacingMarker = false,
                 selectedHallVertices = emptyList(),
                 editingHallId = editingHallId,
+                rotationDegrees = 0f,
                 isHallDefinitionPanelVisible = false,
                 pendingHallEditState = editState
             )

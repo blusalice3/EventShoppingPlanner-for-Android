@@ -14,6 +14,9 @@ interface EventDao {
     @Query("SELECT * FROM events ORDER BY updatedAt DESC")
     fun getAllEvents(): Flow<List<EventEntity>>
 
+    @Query("SELECT name FROM events")
+    suspend fun getAllEventNames(): List<String>
+
     @Query("SELECT * FROM events WHERE id = :eventId")
     suspend fun getEventById(eventId: String): EventEntity?
 

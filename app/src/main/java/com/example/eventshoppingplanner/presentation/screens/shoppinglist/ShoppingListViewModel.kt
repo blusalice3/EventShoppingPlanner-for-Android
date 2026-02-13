@@ -15,7 +15,10 @@ import com.example.eventshoppingplanner.data.local.entity.VisitListEntity
 import com.example.eventshoppingplanner.data.preferences.AppPreference
 import com.example.eventshoppingplanner.domain.model.Event
 import com.example.eventshoppingplanner.domain.model.HallDefinition
+import com.example.eventshoppingplanner.domain.model.DayMapData
 import com.example.eventshoppingplanner.domain.model.PriorityLevel
+import com.example.eventshoppingplanner.domain.model.RouteSegment
+import com.example.eventshoppingplanner.domain.model.ItemSource
 import com.example.eventshoppingplanner.domain.model.ProtectionLevel
 import com.example.eventshoppingplanner.domain.model.PurchaseStatus
 import com.example.eventshoppingplanner.domain.model.ShoppingItem
@@ -25,6 +28,7 @@ import com.example.eventshoppingplanner.domain.repository.EventRepository
 import com.example.eventshoppingplanner.domain.repository.MapDataRepository
 import com.example.eventshoppingplanner.domain.repository.ShoppingItemRepository
 import com.example.eventshoppingplanner.util.HallUtils
+import com.example.eventshoppingplanner.util.PathfindingUtils
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -34,7 +38,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -58,12 +61,85 @@ enum class ExecuteStatusFilter(val displayName: String, val status: PurchaseStat
 }
 
 /**
- * エクスポート用データ
+ * 集中モードのフェーズ
  */
-data class ExportData(
-    val items: List<ShoppingItem>,
-    val executeListItemIds: Map<String, List<String>>
+enum class FocusPhase(val displayName: String) {
+    NORMAL("通常"),
+    POSTPONED("後回し"),
+    LATE("遅参")
+}
+
+/**
+ * 集中モードのレイアウトモード
+ */
+enum class FocusLayoutMode(val displayName: String) {
+    SMARTPHONE("スマートフォン"),
+    TABLET("タブレット")
+}
+
+/**
+ * 集中モード: セルタップポップアップ情報
+ */
+data class FocusCellPopup(
+    val blockName: String,
+    val number: Int,
+    val items: List<ShoppingItem>
 )
+
+/**
+ * 集中モード: 新規アイテム追加ダイアログ情報
+ */
+data class FocusAddItemDialog(
+    val eventDate: String,
+    val block: String,
+    val number: String
+)
+
+/**
+ * 集中モード: マップセルの状態
+ */
+data class FocusCellState(
+    val hasItems: Boolean,
+    val items: List<ShoppingItem>,
+    val visitKeys: Set<String>,
+    val isCurrentPosition: Boolean,
+    val isNextDestination: Boolean,
+    val allNone: Boolean,
+    val allProcessed: Boolean,
+    val hasPostponed: Boolean,
+    val hasLate: Boolean,
+    val isVisited: Boolean
+)
+
+/**
+ * 集中モード: ルート範囲
+ */
+data class FocusRouteBounds(
+    val minRow: Int, val maxRow: Int,
+    val minCol: Int, val maxCol: Int
+)
+
+/**
+ * 集中モードの訪問先
+ */
+data class FocusVisit(
+    val key: String,
+    val items: List<ShoppingItem>
+) {
+    companion object {
+        /** ナンバーからベース部分を抽出（"12a" → "12a", "12ab" → "12a"） */
+        fun extractBaseNumber(number: String): String {
+            val match = Regex("^(\\d+[a-zA-Z])").find(number)
+            return match?.groupValues?.get(1)?.lowercase() ?: number.lowercase()
+        }
+
+        /** 訪問先キー生成（参加日 + ブロック + ベースナンバー） */
+        fun getVisitKey(item: ShoppingItem): String {
+            val baseNumber = extractBaseNumber(item.number)
+            return "${item.eventDate}-${item.block}-$baseNumber"
+        }
+    }
+}
 
 data class ShoppingListUiState(
     val event: Event? = null,
@@ -119,7 +195,34 @@ data class ShoppingListUiState(
     // 日別 ブロック名→ホールIDマッピング（ドラッグ制約用）
     val dayBlockToHallIdMap: Map<String, Map<String, String>> = emptyMap(),  // dayName → (blockName → hallId)
     // 日別 ホールID→ホール名マッピング（グループ表示用）
-    val dayHallNamesMap: Map<String, Map<String, String>> = emptyMap()  // dayName → (hallId → hallName)
+    val dayHallNamesMap: Map<String, Map<String, String>> = emptyMap(),  // dayName → (hallId → hallName)
+
+    // ========== 集中モード状態 ==========
+    val focusPhase: FocusPhase = FocusPhase.NORMAL,
+    val focusPhaseIndex: Int = 0,
+    val focusCompleted: Boolean = false,
+    val focusLastInteractedItemId: String? = null,
+    val postponedPhaseItemIds: Set<String> = emptySet(),
+    val latePhaseItemIds: Set<String> = emptySet(),
+    val focusSavedPhaseIndices: Map<FocusPhase, Int> = mapOf(
+        FocusPhase.NORMAL to 0, FocusPhase.POSTPONED to 0, FocusPhase.LATE to 0
+    ),
+    val focusNotification: String? = null,
+    val autoAdvanceCountdown: Int? = null,
+    val blinkingPriceItemIds: Set<String> = emptySet(),
+    val showPhaseChangeDialog: Boolean = false,
+    val phaseChangeTargetPhase: FocusPhase? = null,
+    val focusLayoutMode: FocusLayoutMode = FocusLayoutMode.SMARTPHONE,
+
+    // ========== 集中モード マップ連動 ==========
+    val focusMapVisible: Boolean = false,
+    val focusMapZoomLevel: Int = 100,               // 30-100（10刻み）
+    val focusMapRotationByMapName: Map<String, Float> = emptyMap(), // mapName -> 角度（0-359）
+    val focusSelectedHallId: String = "follow",     // "follow" = 追随モード, ホールID
+    val focusSplitRatio: Float = 0.5f,              // SP+マップ時の上下分割比率（0.2-0.8）
+    val focusMapDataList: Map<String, DayMapData> = emptyMap(),
+    val focusCellPopup: FocusCellPopup? = null,
+    val focusAddItemDialog: FocusAddItemDialog? = null
 ) {
     /** 現在タブのモード */
     val currentMode: String
@@ -248,6 +351,414 @@ data class ShoppingListUiState(
                 item.title.lowercase().contains(q) ||
                 item.remarks.lowercase().contains(q)
     }
+
+    // ========== 集中モード算出プロパティ ==========
+
+    /** 集中モード: 実行列アイテム（順序保持） */
+    val focusExecuteItems: List<ShoppingItem>
+        get() {
+            val executeIds = currentExecuteIds
+            val itemsMap = allItems.associateBy { it.id }
+            return executeIds.mapNotNull { itemsMap[it] }
+        }
+
+    /** 集中モード: 全訪問先リスト（実行列順序でグループ化） */
+    val focusAllVisits: List<FocusVisit>
+        get() {
+            val visitKeyOrder = mutableListOf<String>()
+            val visitMap = mutableMapOf<String, MutableList<ShoppingItem>>()
+            focusExecuteItems.forEach { item ->
+                val key = FocusVisit.getVisitKey(item)
+                if (!visitMap.containsKey(key)) {
+                    visitMap[key] = mutableListOf()
+                    visitKeyOrder.add(key)
+                }
+                visitMap[key]!!.add(item)
+            }
+            return visitKeyOrder.map { key -> FocusVisit(key, visitMap[key]!!) }
+        }
+
+    /** 現時点のPostpone/LateアイテムIDセット（通常フェーズ中の動的参照用） */
+    private val currentPostponedItemIds: Set<String>
+        get() = focusExecuteItems.filter { it.purchaseStatus == PurchaseStatus.POSTPONE }.map { it.id }.toSet()
+    private val currentLateItemIds: Set<String>
+        get() = focusExecuteItems.filter { it.purchaseStatus == PurchaseStatus.LATE }.map { it.id }.toSet()
+
+    /** フェーズごとの訪問先リスト */
+    val focusVisitsByPhase: Map<FocusPhase, List<FocusVisit>>
+        get() {
+            val normal = mutableListOf<FocusVisit>()
+            val postponed = mutableListOf<FocusVisit>()
+            val late = mutableListOf<FocusVisit>()
+
+            focusAllVisits.forEach { visit ->
+                normal.add(visit)
+
+                // 後回しフェーズ
+                if (focusPhase == FocusPhase.NORMAL) {
+                    if (visit.items.any { currentPostponedItemIds.contains(it.id) }) postponed.add(visit)
+                } else {
+                    if (visit.items.any { postponedPhaseItemIds.contains(it.id) }) postponed.add(visit)
+                }
+
+                // 遅参フェーズ
+                if (focusPhase == FocusPhase.NORMAL || focusPhase == FocusPhase.POSTPONED) {
+                    if (visit.items.any { currentLateItemIds.contains(it.id) }) late.add(visit)
+                } else {
+                    if (visit.items.any { latePhaseItemIds.contains(it.id) }) late.add(visit)
+                }
+            }
+
+            return mapOf(FocusPhase.NORMAL to normal, FocusPhase.POSTPONED to postponed, FocusPhase.LATE to late)
+        }
+
+    /** 現在フェーズの訪問先リスト */
+    val focusCurrentPhaseVisits: List<FocusVisit>
+        get() = focusVisitsByPhase[focusPhase] ?: emptyList()
+
+    /** 現在の訪問先 */
+    val focusCurrentVisit: FocusVisit?
+        get() {
+            if (focusCurrentPhaseVisits.isEmpty()) return null
+            val safeIndex = focusPhaseIndex.coerceAtMost(focusCurrentPhaseVisits.size - 1)
+            return focusCurrentPhaseVisits.getOrNull(safeIndex)
+        }
+
+    /** 次の訪問先 */
+    val focusNextVisit: FocusVisit?
+        get() {
+            val visits = focusCurrentPhaseVisits
+            val nextIndex = focusPhaseIndex + 1
+            if (nextIndex < visits.size) return visits[nextIndex]
+            val byPhase = focusVisitsByPhase
+            if (focusPhase == FocusPhase.NORMAL) {
+                byPhase[FocusPhase.POSTPONED]?.firstOrNull()?.let { return it }
+            }
+            if (focusPhase == FocusPhase.NORMAL || focusPhase == FocusPhase.POSTPONED) {
+                byPhase[FocusPhase.LATE]?.firstOrNull()?.let { return it }
+            }
+            return null
+        }
+
+    /** 現在の訪問先で表示すべきアイテム */
+    val focusCurrentVisitDisplayItems: List<ShoppingItem>
+        get() {
+            val visit = focusCurrentVisit ?: return emptyList()
+            return when (focusPhase) {
+                FocusPhase.NORMAL -> visit.items
+                FocusPhase.POSTPONED -> visit.items.filter { postponedPhaseItemIds.contains(it.id) }
+                FocusPhase.LATE -> visit.items.filter { latePhaseItemIds.contains(it.id) }
+            }
+        }
+
+    /** 価格未定かつ購入済みのアイテムがあるか */
+    val focusHasUndefinedPricePurchased: Boolean
+        get() = focusCurrentVisitDisplayItems.any {
+            it.purchaseStatus == PurchaseStatus.PURCHASED && (it.price == null || it.price == -1)
+        }
+
+    /** 現在の訪問先チェック済み数 */
+    val focusCheckedCount: Int
+        get() = focusCurrentVisitDisplayItems.count { it.purchaseStatus != PurchaseStatus.NONE }
+
+    /** 全フェーズ通算の訪問先合計数 */
+    val focusTotalVisits: Int
+        get() {
+            val byPhase = focusVisitsByPhase
+            return (byPhase[FocusPhase.NORMAL]?.size ?: 0) +
+                    (byPhase[FocusPhase.POSTPONED]?.size ?: 0) +
+                    (byPhase[FocusPhase.LATE]?.size ?: 0)
+        }
+
+    /** 現在の訪問先番号（全フェーズ通算） */
+    val focusCurrentVisitNumber: Int
+        get() {
+            val byPhase = focusVisitsByPhase
+            var number = focusPhaseIndex + 1
+            if (focusPhase == FocusPhase.POSTPONED) number += byPhase[FocusPhase.NORMAL]?.size ?: 0
+            if (focusPhase == FocusPhase.LATE) {
+                number += (byPhase[FocusPhase.NORMAL]?.size ?: 0) + (byPhase[FocusPhase.POSTPONED]?.size ?: 0)
+            }
+            return number
+        }
+
+    /** 訪問先の総額情報 */
+    data class FocusPriceInfo(val totalPrice: Int, val undefinedCount: Int, val allUndefined: Boolean)
+    val focusCurrentVisitPriceInfo: FocusPriceInfo
+        get() {
+            var totalPrice = 0
+            var undefinedCount = 0
+            focusCurrentVisitDisplayItems.forEach { item ->
+                if (item.price == null || item.price == -1) {
+                    undefinedCount += item.quantity
+                } else {
+                    totalPrice += item.price * item.quantity
+                }
+            }
+            val allUndefined = undefinedCount > 0 && totalPrice == 0 &&
+                    focusCurrentVisitDisplayItems.all { it.price == null || it.price == -1 }
+            return FocusPriceInfo(totalPrice, undefinedCount, allUndefined)
+        }
+
+    /** 残りの合計金額（未購入+後回し+遅参） */
+    val focusRemainingCost: Int
+        get() = focusExecuteItems.sumOf { item ->
+            val isPurchasable = item.purchaseStatus in listOf(PurchaseStatus.NONE, PurchaseStatus.POSTPONE, PurchaseStatus.LATE)
+            if (!isPurchasable) return@sumOf 0
+            val price = if (item.price != null && item.price > 0) item.price else 0
+            price * item.quantity
+        }
+
+    /** 購入済み件数 */
+    val focusPurchasedCount: Int
+        get() = focusExecuteItems.count { it.purchaseStatus == PurchaseStatus.PURCHASED }
+
+    /** 次の訪問先情報テキスト */
+    val focusNextVisitInfo: Pair<String, String>
+        get() {
+            val next = focusNextVisit ?: return "最終" to ""
+            val item = next.items.firstOrNull() ?: return "最終" to ""
+            val baseNumber = FocusVisit.extractBaseNumber(item.number)
+            return "${item.block}-${baseNumber.uppercase()}" to (item.circle)
+        }
+
+    /** 現在の訪問先スペース情報 */
+    val focusSpaceInfo: String
+        get() {
+            val item = focusCurrentVisit?.items?.firstOrNull() ?: return ""
+            return "${item.block}-${FocusVisit.extractBaseNumber(item.number).uppercase()}"
+        }
+
+    /** 現在の訪問先サークル名 */
+    val focusCircleName: String
+        get() = focusCurrentVisit?.items?.firstOrNull()?.circle ?: ""
+
+    /** 自動スキップ中かどうか */
+    val focusIsAutoAdvancing: Boolean
+        get() = !focusCompleted && focusAllVisits.isNotEmpty() &&
+                focusCurrentVisitDisplayItems.isEmpty() && focusCurrentPhaseVisits.isNotEmpty()
+
+    /** 全アイテムが後回し/遅参かどうか（自動進行チェック用） */
+    val focusAllPostponedOrLate: Boolean
+        get() = focusCurrentVisitDisplayItems.isNotEmpty() &&
+                focusCurrentVisitDisplayItems.all {
+                    it.purchaseStatus == PurchaseStatus.POSTPONE || it.purchaseStatus == PurchaseStatus.LATE
+                }
+
+    /** 次へボタンが点滅すべきか（全アイテム処理済み） */
+    val focusIsNextButtonBlinking: Boolean
+        get() = !focusHasUndefinedPricePurchased &&
+                focusCurrentVisitDisplayItems.isNotEmpty() &&
+                focusCurrentVisitDisplayItems.none { it.purchaseStatus == PurchaseStatus.NONE }
+
+    /** フェーズ切替ダイアログ: 保存済みインデックスがあるか */
+    val focusPhaseChangeHasSavedIndex: Boolean
+        get() {
+            val target = phaseChangeTargetPhase ?: return false
+            val saved = focusSavedPhaseIndices[target] ?: 0
+            val targetVisits = focusVisitsByPhase[target] ?: emptyList()
+            return saved > 0 && saved < targetVisits.size
+        }
+
+    // ========== 集中モード マップ連動算出プロパティ ==========
+
+    /** マップデータが利用可能か */
+    val focusHasMapData: Boolean
+        get() = focusMapDataList.isNotEmpty()
+
+    /** 現在のマップ名 */
+    val focusCurrentMapName: String?
+        get() {
+            val visit = focusCurrentVisit ?: return null
+            val eventDate = visit.items.firstOrNull()?.eventDate ?: return null
+            return "${eventDate}マップ"
+        }
+
+    /** 現在のマップデータ */
+    val focusCurrentMapData: DayMapData?
+        get() {
+            val mapName = focusCurrentMapName ?: return null
+            return focusMapDataList[mapName]
+        }
+
+    /** 現在マップの回転角度 */
+    val focusMapRotationDegrees: Float
+        get() {
+            val mapName = focusCurrentMapName ?: return 0f
+            val angle = focusMapRotationByMapName[mapName] ?: 0f
+            val normalized = angle % 360f
+            return if (normalized < 0f) normalized + 360f else normalized
+        }
+
+    /** 追随モード時のホール（現在訪問先のセルが属するホール） */
+    val focusFollowHall: HallDefinition?
+        get() {
+            if (hallDefinitions.isEmpty()) return null
+            val visit = focusCurrentVisit ?: return null
+            val mapData = focusCurrentMapData ?: return null
+            val currentItem = visit.items.firstOrNull() ?: return null
+
+            val block = mapData.blocks.find { it.name == currentItem.block } ?: return null
+            val numStr = Regex("^(\\d+)").find(currentItem.number)?.groupValues?.get(1) ?: return null
+            val num = numStr.toIntOrNull() ?: return null
+            val cell = block.numberCells.find { it.value == num } ?: return null
+
+            for (hall in hallDefinitions) {
+                if (hall.vertices.size >= 3 &&
+                    HallUtils.isPointInPolygon(cell.row, cell.col, hall.vertices)) {
+                    return hall
+                }
+            }
+            return null
+        }
+
+    /** 実際に選択中のホール */
+    val focusSelectedHall: HallDefinition?
+        get() {
+            if (focusSelectedHallId == "follow") return focusFollowHall
+            return hallDefinitions.find { it.id == focusSelectedHallId }
+        }
+
+    /** セル状態マップ（マップ描画用） */
+    val focusCellStates: Map<String, FocusCellState>
+        get() {
+            val mapData = focusCurrentMapData ?: return emptyMap()
+            val mapName = focusCurrentMapName ?: return emptyMap()
+            val dayName = mapName.removeSuffix("マップ")
+            val currentVisitKey = focusCurrentVisit?.key
+            val nextVisitKey = focusNextVisit?.key
+            val states = mutableMapOf<String, FocusCellState>()
+
+            // アイテムからセル状態を構築
+            val dayItems = allItems.filter { it.eventDate == dayName }
+            for (item in dayItems) {
+                val block = mapData.blocks.find { it.name.equals(item.block, ignoreCase = true) } ?: continue
+                val numStr = Regex("^(\\d+)").find(item.number)?.groupValues?.get(1) ?: continue
+                val num = numStr.toIntOrNull() ?: continue
+                val cell = block.numberCells.find { it.value == num } ?: continue
+                val key = "${cell.row}-${cell.col}"
+                val visitKey = FocusVisit.getVisitKey(item)
+
+                val existing = states[key]
+                val items = (existing?.items ?: emptyList()) + item
+                val visitKeys = (existing?.visitKeys ?: emptySet()) + visitKey
+                val allNone = if (item.purchaseStatus == PurchaseStatus.NONE) (existing?.allNone ?: true) else false
+                val allProcessed = if (item.purchaseStatus == PurchaseStatus.NONE) false else (existing?.allProcessed ?: true)
+                val hasPostponed = (existing?.hasPostponed ?: false) || item.purchaseStatus == PurchaseStatus.POSTPONE
+                val hasLate = (existing?.hasLate ?: false) || item.purchaseStatus == PurchaseStatus.LATE
+
+                states[key] = FocusCellState(
+                    hasItems = true,
+                    items = items,
+                    visitKeys = visitKeys,
+                    isCurrentPosition = false,
+                    isNextDestination = false,
+                    allNone = allNone,
+                    allProcessed = allProcessed,
+                    hasPostponed = hasPostponed,
+                    hasLate = hasLate,
+                    isVisited = false
+                )
+            }
+
+            // 訪問済み・現在位置・次の目的地を設定
+            for ((key, state) in states) {
+                val hasFinalStatus = state.items.any {
+                    it.purchaseStatus == PurchaseStatus.PURCHASED ||
+                            it.purchaseStatus == PurchaseStatus.SOLD_OUT ||
+                            it.purchaseStatus == PurchaseStatus.ABSENT
+                }
+                val onlyPostponedOrLate = state.items.all {
+                    it.purchaseStatus == PurchaseStatus.POSTPONE || it.purchaseStatus == PurchaseStatus.LATE
+                }
+                val isVisited = !state.allNone && (hasFinalStatus || (!state.allNone && !onlyPostponedOrLate))
+                val isCurrentPosition = currentVisitKey != null && state.visitKeys.contains(currentVisitKey)
+                val isNextDestination = nextVisitKey != null && state.visitKeys.contains(nextVisitKey)
+
+                states[key] = state.copy(
+                    isVisited = isVisited,
+                    isCurrentPosition = isCurrentPosition,
+                    isNextDestination = isNextDestination
+                )
+            }
+            return states
+        }
+
+    /** 現在位置のセル座標 */
+    val focusCurrentCellCoords: Pair<Int, Int>?
+        get() = focusCellStates.entries.firstOrNull { it.value.isCurrentPosition }
+            ?.let { val (r, c) = it.key.split("-").map(String::toInt); r to c }
+
+    /** 次の目的地のセル座標 */
+    val focusNextCellCoords: Pair<Int, Int>?
+        get() = focusCellStates.entries.firstOrNull { it.value.isNextDestination }
+            ?.let { val (r, c) = it.key.split("-").map(String::toInt); r to c }
+
+    /** ルートセグメント（現在位置→次の目的地） */
+    val focusRouteSegments: List<RouteSegment>
+        get() {
+            val mapData = focusCurrentMapData ?: return emptyList()
+            val current = focusCurrentCellCoords ?: return emptyList()
+            val next = focusNextCellCoords ?: return emptyList()
+            if (current == next) return emptyList()
+
+            val blockNameCells = PathfindingUtils.generateBlockNameCells(mapData)
+
+            val path = PathfindingUtils.findPath(
+                mapData, current.first, current.second, next.first, next.second, blockNameCells
+            )
+            val simplifiedPath = PathfindingUtils.simplifyPath(path)
+
+            if (simplifiedPath.size < 2) return emptyList()
+
+            // 現在訪問先のアイテムからPriorityLevel取得
+            val currentVisit = focusCurrentVisit
+            val fromPriority = currentVisit?.items?.firstOrNull()?.let {
+                focusExecuteItems.find { ei -> ei.id == it.id }?.priorityLevel
+            } ?: PriorityLevel.NONE
+            val nextVisit = focusNextVisit
+            val toPriority = nextVisit?.items?.firstOrNull()?.let {
+                focusExecuteItems.find { ei -> ei.id == it.id }?.priorityLevel
+            } ?: PriorityLevel.NONE
+
+            return listOf(
+                RouteSegment(
+                    fromRow = current.first,
+                    fromCol = current.second,
+                    toRow = next.first,
+                    toCol = next.second,
+                    path = simplifiedPath,
+                    fromPriority = fromPriority,
+                    toPriority = toPriority
+                )
+            )
+        }
+
+    /** ルート範囲 */
+    val focusRouteBounds: FocusRouteBounds?
+        get() {
+            val current = focusCurrentCellCoords ?: return null
+            var minRow = current.first
+            var maxRow = current.first
+            var minCol = current.second
+            var maxCol = current.second
+
+            val next = focusNextCellCoords
+            if (next != null) {
+                minRow = minOf(minRow, next.first)
+                maxRow = maxOf(maxRow, next.first)
+                minCol = minOf(minCol, next.second)
+                maxCol = maxOf(maxCol, next.second)
+            }
+
+            val margin = 3
+            return FocusRouteBounds(
+                minRow = maxOf(1, minRow - margin),
+                maxRow = maxRow + margin,
+                minCol = maxOf(1, minCol - margin),
+                maxCol = maxCol + margin
+            )
+        }
 }
 
 @HiltViewModel
@@ -276,6 +787,10 @@ class ShoppingListViewModel @Inject constructor(
 
     // VisitList同期中フラグ（循環更新防止）
     private var isSyncingVisitList = false
+
+    // 集中モード: 自動進行タイマー / 通知タイマー
+    private var autoAdvanceJob: Job? = null
+    private var notificationJob: Job? = null
 
     init {
         loadEvent()
@@ -663,7 +1178,14 @@ class ShoppingListViewModel @Inject constructor(
         val state = _uiState.value
         val currentDate = state.selectedDate ?: return
         val currentMode = state.dayModes[currentDate] ?: "edit"
-        val newMode = if (currentMode == "edit") "execute" else "edit"
+        val newMode = when (currentMode) {
+            "edit" -> "execute"
+            else -> "edit"  // "execute" and "focus" → "edit"
+        }
+        if (currentMode == "focus") {
+            cancelAutoAdvance()
+            cancelNotification()
+        }
         setDayMode(currentDate, newMode)
     }
 
@@ -1074,7 +1596,7 @@ class ShoppingListViewModel @Inject constructor(
         priceChanged: Boolean = false
     ): ShoppingItem {
         val currentMode = _uiState.value.currentMode
-        if (currentMode == "execute" && (purchaseStatusChanged || priceChanged)) {
+        if ((currentMode == "execute" || currentMode == "focus") && (purchaseStatusChanged || priceChanged)) {
             if (item.protectionLevel == ProtectionLevel.NONE) {
                 return item.copy(protectionLevel = ProtectionLevel.DELETABLE)
             }
@@ -1179,12 +1701,622 @@ class ShoppingListViewModel @Inject constructor(
         _uiState.update { it.copy(duplicateSpaceItemIds = duplicateIds) }
     }
 
-    // ========== エクスポート ==========
+    // ========== 集中モード ==========
 
-    suspend fun getExportData(): ExportData {
-        val items = itemRepository.getItemsByEventId(eventId).first()
-        val executeListItemIds = _uiState.value.executeListItemIds
-        return ExportData(items, executeListItemIds)
+    /**
+     * 集中モードに入る
+     */
+    fun enterFocusMode() {
+        val state = _uiState.value
+        val currentDate = state.selectedDate ?: return
+        val executeIds = state.currentExecuteIds
+        if (executeIds.isEmpty()) return
+
+        cancelAutoAdvance()
+        cancelNotification()
+
+        _uiState.update {
+            it.copy(
+                focusPhase = FocusPhase.NORMAL,
+                focusPhaseIndex = 0,
+                focusCompleted = false,
+                focusLastInteractedItemId = null,
+                postponedPhaseItemIds = emptySet(),
+                latePhaseItemIds = emptySet(),
+                focusSavedPhaseIndices = mapOf(
+                    FocusPhase.NORMAL to 0, FocusPhase.POSTPONED to 0, FocusPhase.LATE to 0
+                ),
+                focusNotification = null,
+                autoAdvanceCountdown = null,
+                blinkingPriceItemIds = emptySet(),
+                showPhaseChangeDialog = false,
+                phaseChangeTargetPhase = null,
+                isRangeSelectionMode = false,
+                rangeSelectionStartId = null,
+                rangeSelectionEndId = null,
+                groupedItemIds = emptyList(),
+                // マップ連動状態リセット
+                focusMapVisible = false,
+                focusMapZoomLevel = 100,
+                focusSelectedHallId = "follow",
+                focusSplitRatio = 0.5f,
+                focusCellPopup = null,
+                focusAddItemDialog = null
+            )
+        }
+        setDayMode(currentDate, "focus")
+        loadFocusMapData()
+    }
+
+    /**
+     * 集中モードを抜ける
+     */
+    fun exitFocusMode(targetMode: String) {
+        val state = _uiState.value
+        val currentDate = state.selectedDate ?: return
+        cancelAutoAdvance()
+        cancelNotification()
+        setDayMode(currentDate, targetMode)
+    }
+
+    /**
+     * 集中モード: レイアウトモード切替
+     */
+    fun toggleFocusLayoutMode() {
+        _uiState.update {
+            val newMode = if (it.focusLayoutMode == FocusLayoutMode.SMARTPHONE)
+                FocusLayoutMode.TABLET else FocusLayoutMode.SMARTPHONE
+            it.copy(focusLayoutMode = newMode)
+        }
+    }
+
+    /**
+     * 集中モード: 次の訪問先へ
+     */
+    fun focusNext() {
+        cancelAutoAdvance()
+        val state = _uiState.value
+
+        // 価格未定チェック
+        if (state.focusHasUndefinedPricePurchased) {
+            showFocusNotification("価格未定のアイテムがあります。価格を入力してください。")
+            val undefinedPriceIds = state.focusCurrentVisitDisplayItems
+                .filter { it.purchaseStatus == PurchaseStatus.PURCHASED && (it.price == null || it.price == -1) }
+                .map { it.id }.toSet()
+            _uiState.update { it.copy(blinkingPriceItemIds = undefinedPriceIds) }
+            return
+        }
+
+        val hasUncheckedItems = state.focusCurrentVisitDisplayItems.any {
+            it.purchaseStatus == PurchaseStatus.NONE
+        }
+
+        // インデックスを保存
+        _uiState.update {
+            it.copy(focusSavedPhaseIndices = it.focusSavedPhaseIndices + (it.focusPhase to it.focusPhaseIndex))
+        }
+
+        val nextIndex = state.focusPhaseIndex + 1
+        if (nextIndex < state.focusCurrentPhaseVisits.size) {
+            _uiState.update {
+                it.copy(focusPhaseIndex = nextIndex, blinkingPriceItemIds = emptySet())
+            }
+        } else {
+            advanceToNextPhase()
+        }
+
+        if (hasUncheckedItems) {
+            showFocusNotification("前のサークルでチェック漏れがあります")
+        }
+    }
+
+    /**
+     * 集中モード: 前の訪問先へ
+     */
+    fun focusPrev() {
+        cancelAutoAdvance()
+        val state = _uiState.value
+
+        if (state.focusCompleted) {
+            _uiState.update { it.copy(focusCompleted = false) }
+            val byPhase = state.focusVisitsByPhase
+            when {
+                (byPhase[FocusPhase.LATE]?.size ?: 0) > 0 -> _uiState.update {
+                    it.copy(focusPhase = FocusPhase.LATE, focusPhaseIndex = (byPhase[FocusPhase.LATE]?.size ?: 1) - 1)
+                }
+                (byPhase[FocusPhase.POSTPONED]?.size ?: 0) > 0 -> _uiState.update {
+                    it.copy(focusPhase = FocusPhase.POSTPONED, focusPhaseIndex = (byPhase[FocusPhase.POSTPONED]?.size ?: 1) - 1)
+                }
+                (byPhase[FocusPhase.NORMAL]?.size ?: 0) > 0 -> _uiState.update {
+                    it.copy(focusPhase = FocusPhase.NORMAL, focusPhaseIndex = (byPhase[FocusPhase.NORMAL]?.size ?: 1) - 1)
+                }
+            }
+            return
+        }
+
+        if (state.focusPhaseIndex > 0) {
+            _uiState.update { it.copy(focusPhaseIndex = it.focusPhaseIndex - 1, blinkingPriceItemIds = emptySet()) }
+        } else {
+            val byPhase = state.focusVisitsByPhase
+            when (state.focusPhase) {
+                FocusPhase.POSTPONED -> {
+                    if ((byPhase[FocusPhase.NORMAL]?.size ?: 0) > 0) {
+                        _uiState.update {
+                            it.copy(focusPhase = FocusPhase.NORMAL,
+                                focusPhaseIndex = (byPhase[FocusPhase.NORMAL]?.size ?: 1) - 1,
+                                blinkingPriceItemIds = emptySet())
+                        }
+                    } else showFocusNotification("最初の訪問サークル・スペースです")
+                }
+                FocusPhase.LATE -> {
+                    if (state.postponedPhaseItemIds.isNotEmpty()) {
+                        _uiState.update {
+                            it.copy(focusPhase = FocusPhase.POSTPONED,
+                                focusPhaseIndex = (byPhase[FocusPhase.POSTPONED]?.size ?: 1) - 1,
+                                blinkingPriceItemIds = emptySet())
+                        }
+                    } else if ((byPhase[FocusPhase.NORMAL]?.size ?: 0) > 0) {
+                        _uiState.update {
+                            it.copy(focusPhase = FocusPhase.NORMAL,
+                                focusPhaseIndex = (byPhase[FocusPhase.NORMAL]?.size ?: 1) - 1,
+                                blinkingPriceItemIds = emptySet())
+                        }
+                    } else showFocusNotification("最初の訪問サークル・スペースです")
+                }
+                FocusPhase.NORMAL -> showFocusNotification("最初の訪問サークル・スペースです")
+            }
+        }
+    }
+
+    /**
+     * 集中モード: 次のフェーズへ自動遷移
+     */
+    private fun advanceToNextPhase() {
+        val state = _uiState.value
+        val executeItems = state.focusExecuteItems
+
+        when (state.focusPhase) {
+            FocusPhase.NORMAL -> {
+                val postponedIds = executeItems.filter { it.purchaseStatus == PurchaseStatus.POSTPONE }.map { it.id }.toSet()
+                val lateIds = executeItems.filter { it.purchaseStatus == PurchaseStatus.LATE }.map { it.id }.toSet()
+                _uiState.update { it.copy(postponedPhaseItemIds = postponedIds, latePhaseItemIds = lateIds) }
+
+                when {
+                    postponedIds.isNotEmpty() -> {
+                        showFocusNotification("後回しアイテムの巡回を開始します")
+                        _uiState.update { it.copy(focusPhase = FocusPhase.POSTPONED, focusPhaseIndex = 0, blinkingPriceItemIds = emptySet()) }
+                    }
+                    lateIds.isNotEmpty() -> {
+                        showFocusNotification("遅参アイテムの巡回を開始します")
+                        _uiState.update { it.copy(focusPhase = FocusPhase.LATE, focusPhaseIndex = 0, blinkingPriceItemIds = emptySet()) }
+                    }
+                    else -> _uiState.update { it.copy(focusCompleted = true) }
+                }
+            }
+            FocusPhase.POSTPONED -> {
+                val currentLateIds = state.latePhaseItemIds.toMutableSet()
+                executeItems.forEach { if (it.purchaseStatus == PurchaseStatus.LATE) currentLateIds.add(it.id) }
+                _uiState.update { it.copy(latePhaseItemIds = currentLateIds) }
+                if (currentLateIds.isNotEmpty()) {
+                    showFocusNotification("遅参アイテムの巡回を開始します")
+                    _uiState.update { it.copy(focusPhase = FocusPhase.LATE, focusPhaseIndex = 0, blinkingPriceItemIds = emptySet()) }
+                } else _uiState.update { it.copy(focusCompleted = true) }
+            }
+            FocusPhase.LATE -> _uiState.update { it.copy(focusCompleted = true) }
+        }
+    }
+
+    /**
+     * 集中モード: アイテムのステータス更新
+     */
+    fun focusUpdateItemStatus(item: ShoppingItem, status: PurchaseStatus) {
+        viewModelScope.launch {
+            val updatedItem = applyProtectionLevelAutoChange(item, purchaseStatusChanged = true)
+                .copy(purchaseStatus = status)
+            itemRepository.updateItem(updatedItem)
+            _uiState.update { it.copy(focusLastInteractedItemId = item.id) }
+
+            if (status != PurchaseStatus.POSTPONE && status != PurchaseStatus.LATE) {
+                cancelAutoAdvance()
+                return@launch
+            }
+            if (_uiState.value.focusPhase != FocusPhase.NORMAL) return@launch
+
+            delay(100)
+            if (_uiState.value.focusAllPostponedOrLate) startAutoAdvance()
+        }
+    }
+
+    /**
+     * 集中モード: アイテムの価格更新
+     */
+    fun focusUpdateItemPrice(itemId: String, price: Int?) {
+        viewModelScope.launch {
+            val item = itemRepository.getItemById(itemId)
+            item?.let {
+                val priceChanged = it.price != price
+                val updatedItem = applyProtectionLevelAutoChange(it, priceChanged = priceChanged).copy(price = price)
+                itemRepository.updateItem(updatedItem)
+                _uiState.update { s -> s.copy(focusLastInteractedItemId = itemId) }
+            }
+        }
+    }
+
+    /**
+     * 集中モード: フェーズ切替ダイアログを開く
+     */
+    fun focusRequestPhaseChange(targetPhase: FocusPhase) {
+        val state = _uiState.value
+        if (targetPhase == state.focusPhase) return
+        val targetVisits = state.focusVisitsByPhase[targetPhase] ?: emptyList()
+        if (targetVisits.isEmpty()) {
+            showFocusNotification("${targetPhase.displayName}フェーズに該当するアイテムがありません")
+            return
+        }
+        _uiState.update { it.copy(showPhaseChangeDialog = true, phaseChangeTargetPhase = targetPhase) }
+    }
+
+    /**
+     * 集中モード: フェーズ切替実行
+     */
+    fun focusExecutePhaseChange(fromStart: Boolean) {
+        val state = _uiState.value
+        val targetPhase = state.phaseChangeTargetPhase ?: return
+        val executeItems = state.focusExecuteItems
+
+        cancelAutoAdvance()
+        _uiState.update {
+            it.copy(focusSavedPhaseIndices = it.focusSavedPhaseIndices + (it.focusPhase to it.focusPhaseIndex))
+        }
+
+        if (state.focusPhase == FocusPhase.NORMAL && (targetPhase == FocusPhase.POSTPONED || targetPhase == FocusPhase.LATE)) {
+            val postponedIds = executeItems.filter { it.purchaseStatus == PurchaseStatus.POSTPONE }.map { it.id }.toSet()
+            val lateIds = executeItems.filter { it.purchaseStatus == PurchaseStatus.LATE }.map { it.id }.toSet()
+            _uiState.update { it.copy(postponedPhaseItemIds = postponedIds, latePhaseItemIds = lateIds) }
+        } else if (state.focusPhase == FocusPhase.POSTPONED && targetPhase == FocusPhase.LATE) {
+            val currentLateIds = state.latePhaseItemIds.toMutableSet()
+            executeItems.forEach { if (it.purchaseStatus == PurchaseStatus.LATE) currentLateIds.add(it.id) }
+            _uiState.update { it.copy(latePhaseItemIds = currentLateIds) }
+        }
+
+        val newIndex = if (fromStart) 0 else (state.focusSavedPhaseIndices[targetPhase] ?: 0)
+        val message = if (fromStart) "${targetPhase.displayName}フェーズを最初から開始します"
+        else "${targetPhase.displayName}フェーズを途中から再開します"
+
+        _uiState.update {
+            it.copy(focusPhase = targetPhase, focusPhaseIndex = newIndex, focusCompleted = false,
+                blinkingPriceItemIds = emptySet(), showPhaseChangeDialog = false, phaseChangeTargetPhase = null)
+        }
+        showFocusNotification(message)
+    }
+
+    fun focusCancelPhaseChange() {
+        _uiState.update { it.copy(showPhaseChangeDialog = false, phaseChangeTargetPhase = null) }
+    }
+
+    private fun startAutoAdvance() {
+        cancelAutoAdvance()
+        autoAdvanceJob = viewModelScope.launch {
+            _uiState.update { it.copy(autoAdvanceCountdown = 3) }
+            delay(1000)
+            _uiState.update { it.copy(autoAdvanceCountdown = 2) }
+            delay(1000)
+            _uiState.update { it.copy(autoAdvanceCountdown = 1) }
+            delay(1000)
+            _uiState.update { it.copy(autoAdvanceCountdown = null) }
+            focusNext()
+        }
+    }
+
+    fun cancelAutoAdvance() {
+        autoAdvanceJob?.cancel()
+        autoAdvanceJob = null
+        _uiState.update { it.copy(autoAdvanceCountdown = null) }
+    }
+
+    private fun showFocusNotification(message: String) {
+        notificationJob?.cancel()
+        _uiState.update { it.copy(focusNotification = message) }
+        notificationJob = viewModelScope.launch {
+            delay(2000)
+            _uiState.update { it.copy(focusNotification = null) }
+        }
+    }
+
+    private fun cancelNotification() {
+        notificationJob?.cancel()
+        notificationJob = null
+        _uiState.update { it.copy(focusNotification = null) }
+    }
+
+    fun focusAutoSkip() {
+        val state = _uiState.value
+        if (state.focusCompleted || state.focusAllVisits.isEmpty()) return
+        if (state.focusCurrentVisitDisplayItems.isNotEmpty()) return
+        if (state.focusCurrentPhaseVisits.isEmpty()) return
+
+        for (i in state.focusPhaseIndex + 1 until state.focusCurrentPhaseVisits.size) {
+            val visit = state.focusCurrentPhaseVisits[i]
+            val hasItems = when (state.focusPhase) {
+                FocusPhase.NORMAL -> visit.items.isNotEmpty()
+                FocusPhase.POSTPONED -> visit.items.any { state.postponedPhaseItemIds.contains(it.id) }
+                FocusPhase.LATE -> visit.items.any { state.latePhaseItemIds.contains(it.id) }
+            }
+            if (hasItems) {
+                _uiState.update { it.copy(focusPhaseIndex = i) }
+                return
+            }
+        }
+        advanceToNextPhase()
+    }
+
+    // ========== 集中モード: マップ連動 ==========
+
+    /**
+     * マップデータを読み込む
+     */
+    private fun loadFocusMapData() {
+        viewModelScope.launch {
+            try {
+                val mapDataMap = mapDataRepository.getMapDataByEventIdOnce(eventId)
+                _uiState.update { it.copy(focusMapDataList = mapDataMap) }
+                Log.d(TAG, "loadFocusMapData: ${mapDataMap.size} maps loaded")
+            } catch (e: Exception) {
+                Log.e(TAG, "loadFocusMapData: error", e)
+            }
+        }
+    }
+
+    /**
+     * マップ表示ON/OFF切替
+     */
+    fun toggleFocusMapVisible() {
+        _uiState.update { it.copy(focusMapVisible = !it.focusMapVisible) }
+    }
+
+    /**
+     * マップズームレベル設定
+     */
+    fun setFocusMapZoomLevel(level: Int) {
+        val clamped = level.coerceIn(30, 100)
+        _uiState.update { it.copy(focusMapZoomLevel = clamped) }
+    }
+
+    /**
+     * 現在マップの回転角度を設定
+     */
+    fun setFocusMapRotation(angle: Float) {
+        val state = _uiState.value
+        val mapName = state.focusCurrentMapName ?: return
+        val normalized = normalizeRotation(angle)
+        _uiState.update {
+            it.copy(
+                focusMapRotationByMapName = it.focusMapRotationByMapName.toMutableMap().apply {
+                    this[mapName] = normalized
+                }
+            )
+        }
+    }
+
+    /**
+     * 現在マップを相対回転
+     */
+    fun rotateFocusMapBy(deltaDegrees: Float) {
+        val current = _uiState.value.focusMapRotationDegrees
+        setFocusMapRotation(current + deltaDegrees)
+    }
+
+    /**
+     * 現在マップ回転をリセット
+     */
+    fun resetFocusMapRotation() {
+        setFocusMapRotation(0f)
+    }
+
+    /**
+     * ホール選択変更
+     */
+    fun setFocusSelectedHallId(id: String) {
+        _uiState.update { it.copy(focusSelectedHallId = id) }
+    }
+
+    /**
+     * SP+マップ時の分割比率変更
+     */
+    fun setFocusSplitRatio(ratio: Float) {
+        _uiState.update { it.copy(focusSplitRatio = ratio.coerceIn(0.2f, 0.8f)) }
+    }
+
+    private fun normalizeRotation(degrees: Float): Float {
+        val normalized = degrees % 360f
+        return if (normalized < 0f) normalized + 360f else normalized
+    }
+
+    /**
+     * セルタップポップアップ表示
+     */
+    fun openFocusCellPopup(blockName: String, number: Int, items: List<ShoppingItem>) {
+        _uiState.update { it.copy(focusCellPopup = FocusCellPopup(blockName, number, items)) }
+    }
+
+    /**
+     * セルタップポップアップ閉じる
+     */
+    fun closeFocusCellPopup() {
+        _uiState.update { it.copy(focusCellPopup = null) }
+    }
+
+    /**
+     * 集中モード: 新規アイテム追加ダイアログを開く
+     * セルポップアップのブロック/ナンバー情報を引き継ぐ
+     */
+    fun openFocusAddItemDialog() {
+        val state = _uiState.value
+        val popup = state.focusCellPopup ?: return
+        val visit = state.focusCurrentVisit ?: return
+        val eventDate = visit.items.firstOrNull()?.eventDate ?: return
+
+        _uiState.update {
+            it.copy(
+                focusCellPopup = null,  // ポップアップを閉じる
+                focusAddItemDialog = FocusAddItemDialog(
+                    eventDate = eventDate,
+                    block = popup.blockName,
+                    number = popup.number.toString()
+                )
+            )
+        }
+    }
+
+    /**
+     * 集中モード: 新規アイテム追加ダイアログを閉じる
+     */
+    fun closeFocusAddItemDialog() {
+        _uiState.update { it.copy(focusAddItemDialog = null) }
+    }
+
+    /**
+     * 集中モード: 新規アイテム追加を実行
+     * - Purchased → 候補リストのみに追加（実行列には追加しない）
+     * - Postpone/Late → 実行列の同フェーズアイテム間で最短経路位置に挿入
+     */
+    fun submitFocusAddItem(
+        circle: String,
+        title: String,
+        price: Int?,
+        quantity: Int,
+        purchaseStatus: PurchaseStatus,
+        remarks: String,
+        url: String
+    ) {
+        val state = _uiState.value
+        val dialog = state.focusAddItemDialog ?: return
+
+        viewModelScope.launch {
+            val maxSortOrder = state.allItems.maxOfOrNull { it.sortOrder } ?: -1
+            val newItem = ShoppingItem(
+                id = java.util.UUID.randomUUID().toString(),
+                eventId = eventId,
+                circle = circle,
+                eventDate = dialog.eventDate,
+                block = dialog.block,
+                number = dialog.number,
+                title = title,
+                price = price,
+                purchaseStatus = purchaseStatus,
+                quantity = quantity,
+                remarks = remarks,
+                url = url.ifBlank { null },
+                sortOrder = maxSortOrder + 1,
+                isInExecuteList = false,
+                source = ItemSource.APP,
+                protectionLevel = ProtectionLevel.FULL
+            )
+
+            // DBに保存
+            itemRepository.insertItem(newItem)
+
+            // 購入済は候補リストのみ（実行列には追加しない）
+            if (purchaseStatus == PurchaseStatus.PURCHASED) {
+                _uiState.update { it.copy(focusAddItemDialog = null) }
+                return@launch
+            }
+
+            // 後回し・遅参: 実行列の最短経路位置に挿入
+            val dayName = dialog.eventDate
+            val currentIds = (state.executeListItemIds[dayName] ?: emptyList()).toMutableList()
+            val allItemsMap = state.allItems.associateBy { it.id }.toMutableMap()
+            allItemsMap[newItem.id] = newItem
+
+            val mapData = state.focusCurrentMapData
+
+            // アイテムのセル座標を取得するヘルパー
+            fun getItemPosition(itemId: String): Pair<Int, Int>? {
+                val item = allItemsMap[itemId] ?: return null
+                if (mapData == null) return null
+                val blockName = item.block.trim()
+                val block = mapData.blocks.find { it.name == blockName }
+                    ?: mapData.blocks.find { it.name.equals(blockName, ignoreCase = true) }
+                    ?: return null
+                val normalizedNumber = item.number.lowercase()
+                for (nc in block.numberCells) {
+                    if (nc.value.toString().lowercase() == normalizedNumber) {
+                        return nc.row to nc.col
+                    }
+                }
+                return (block.startRow + block.endRow) / 2 to (block.startCol + block.endCol) / 2
+            }
+
+            fun calcDistance(p1: Pair<Int, Int>, p2: Pair<Int, Int>): Int {
+                return kotlin.math.abs(p1.first - p2.first) + kotlin.math.abs(p1.second - p2.second)
+            }
+
+            // 同じフェーズのアイテムのインデックスを収集
+            val samePhaseIndices = mutableListOf<Int>()
+            for (i in currentIds.indices) {
+                val existingItem = allItemsMap[currentIds[i]]
+                if (existingItem != null && existingItem.purchaseStatus == purchaseStatus) {
+                    samePhaseIndices.add(i)
+                }
+            }
+
+            val newItemPos = getItemPosition(newItem.id)
+
+            if (samePhaseIndices.isEmpty() || newItemPos == null) {
+                // 同フェーズアイテムなし → 末尾に追加
+                currentIds.add(newItem.id)
+            } else {
+                // 同フェーズアイテム間で最短経路になる挿入位置を探す
+                var bestInsertIndex = samePhaseIndices.last() + 1
+                var minTotalDistance = Int.MAX_VALUE
+
+                for (insertIdx in 0..samePhaseIndices.size) {
+                    var totalDistance = 0
+
+                    // 挿入位置の前のアイテムとの距離
+                    if (insertIdx > 0) {
+                        val prevId = currentIds[samePhaseIndices[insertIdx - 1]]
+                        val prevPos = getItemPosition(prevId)
+                        if (prevPos != null) {
+                            totalDistance += calcDistance(prevPos, newItemPos)
+                        }
+                    }
+
+                    // 挿入位置の後のアイテムとの距離
+                    if (insertIdx < samePhaseIndices.size) {
+                        val nextId = currentIds[samePhaseIndices[insertIdx]]
+                        val nextPos = getItemPosition(nextId)
+                        if (nextPos != null) {
+                            totalDistance += calcDistance(newItemPos, nextPos)
+                        }
+
+                        // 元の前後距離を引く
+                        if (insertIdx > 0) {
+                            val prevId = currentIds[samePhaseIndices[insertIdx - 1]]
+                            val prevPos = getItemPosition(prevId)
+                            if (prevPos != null && nextPos != null) {
+                                totalDistance -= calcDistance(prevPos, nextPos)
+                            }
+                        }
+                    }
+
+                    if (totalDistance < minTotalDistance) {
+                        minTotalDistance = totalDistance
+                        bestInsertIndex = when {
+                            insertIdx == 0 -> samePhaseIndices[0]
+                            insertIdx == samePhaseIndices.size -> samePhaseIndices.last() + 1
+                            else -> samePhaseIndices[insertIdx]
+                        }
+                    }
+                }
+
+                currentIds.add(bestInsertIndex, newItem.id)
+            }
+
+            saveExecuteList(dayName, currentIds)
+            syncExecuteToVisitList(dayName, currentIds)
+            _uiState.update { it.copy(focusAddItemDialog = null) }
+        }
     }
 
     companion object {

@@ -39,6 +39,20 @@ android {
     buildFeatures {
         compose = true
     }
+
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+                "META-INF/versions/9/module-info.class",
+                "mozilla/public-suffix-list.txt"
+            )
+        }
+    }
 }
 
 dependencies {
@@ -81,6 +95,10 @@ dependencies {
 
     // Apache Commons CSV
     implementation("org.apache.commons:commons-csv:1.10.0")
+
+    // Apache POI (XLSX read/write)
+    implementation("org.apache.poi:poi:5.2.5")
+    implementation("org.apache.poi:poi-ooxml:5.2.5")
 
     // Gson for JSON serialization
     implementation("com.google.code.gson:gson:2.10.1")

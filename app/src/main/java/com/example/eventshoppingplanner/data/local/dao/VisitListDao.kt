@@ -19,6 +19,9 @@ interface VisitListDao {
     @Query("SELECT * FROM visit_lists WHERE eventId = :eventId")
     fun getVisitListsByEventId(eventId: String): Flow<List<VisitListEntity>>
 
+    @Query("SELECT * FROM visit_lists WHERE eventId = :eventId")
+    suspend fun getVisitListsByEventIdOnce(eventId: String): List<VisitListEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertVisitList(visitList: VisitListEntity)
 

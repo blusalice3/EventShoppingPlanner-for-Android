@@ -14,6 +14,9 @@ interface ShoppingItemDao {
     @Query("SELECT * FROM shopping_items WHERE eventId = :eventId ORDER BY sortOrder ASC")
     fun getItemsByEventId(eventId: String): Flow<List<ShoppingItemEntity>>
 
+    @Query("SELECT * FROM shopping_items WHERE eventId = :eventId ORDER BY sortOrder ASC")
+    suspend fun getItemsByEventIdOnce(eventId: String): List<ShoppingItemEntity>
+
     @Query("SELECT * FROM shopping_items WHERE eventId = :eventId AND eventDate = :eventDate ORDER BY sortOrder ASC")
     fun getItemsByEventIdAndDate(eventId: String, eventDate: String): Flow<List<ShoppingItemEntity>>
 

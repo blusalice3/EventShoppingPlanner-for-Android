@@ -42,6 +42,32 @@ object CsvParser {
         .setTrim(true)
         .build()
 
+    private const val METADATA_PREFIX = "#METADATA"
+    private const val METADATA_SPREADSHEET_URL = "spreadsheetUrl"
+    private const val COLUMN_TYPE_EXECUTE = "実行列"
+    private const val COLUMN_TYPE_CANDIDATE = "候補リスト"
+    private const val COLUMN_TYPE_EXECUTE_KEY = "execute"
+    private const val COLUMN_TYPE_CANDIDATE_KEY = "candidate"
+
+    private val nonDigitRegex = Regex("[^0-9]")
+
+    private data class ItemFields(
+        val circle: String,
+        val eventDate: String,
+        val block: String,
+        val number: String,
+        val title: String,
+        val priceStr: String,
+        val quantityStr: String,
+        val remarks: String,
+        val url: String
+    )
+
+    private data class UrlTransferGroupKey(
+        val eventDate: String,
+        val circle: String
+    )
+
     // =========================================================================
     // 既存: ヘッダー名ベースのパーサ（アプリエクスポートCSV後方互換）
     // =========================================================================
@@ -83,7 +109,7 @@ object CsvParser {
                                 priorityLevel = PriorityLevel.NONE,
                                 protectionLevel = ProtectionLevel.NONE,
                                 source = ItemSource.SPREADSHEET,
-                                isInExecuteList = record.get("列の種類") == "実行列",
+                                isInExecuteList = record.get("列の種類") == COLUMN_TYPE_EXECUTE,
                                 sortOrder = record.get("列内順番")?.toIntOrNull() ?: sortOrder++
                             )
                             items.add(item)
@@ -125,15 +151,16 @@ object CsvParser {
 
             // ヘッダー行判定: 1行目に「サークル名」が含まれればスキップ
             var startIndex = 0
-            if (lines.isNotEmpty() && lines[0].contains("サークル名")) {
+            if (lines.isNotEmpty() && lines.first().contains("サークル名")) {
                 startIndex = 1
             }
 
             // メタデータ行をチェック（ファイル末尾にある可能性）
             for (i in lines.indices.reversed()) {
-                if (lines[i].startsWith("#METADATA")) {
-                    val metadataCells = parseCSVLine(lines[i])
-                    if (metadataCells.size >= 3 && metadataCells[1] == "spreadsheetUrl") {
+                val line = lines[i]
+                if (line.startsWith(METADATA_PREFIX)) {
+                    val metadataCells = parseCSVLine(line)
+                    if (metadataCells.size >= 3 && metadataCells[1] == METADATA_SPREADSHEET_URL) {
                         spreadsheetUrl = metadataCells[2].trim()
                     }
                     break
@@ -144,82 +171,30 @@ object CsvParser {
 
             for (i in startIndex until lines.size) {
                 val line = lines[i]
-                if (line.isBlank()) continue
-
-                // メタデータ行をスキップ
-                if (line.startsWith("#METADATA")) continue
-
-                // ヘッダー行をスキップ（念のため再チェック）
-                if (line.contains("サークル名") && line.contains("参加日") && line.contains("ブロック")) {
-                    continue
-                }
+                if (shouldSkipImportLine(line)) continue
 
                 val cells = parseCSVLine(line)
-
-                // --- フォーマット判定 ---
-                // フォーマット1: A列(0)〜D列(3)がすべて非空
-                var circle = cells.getOrNull(0)?.trim() ?: ""
-                var eventDate = cells.getOrNull(1)?.trim() ?: ""
-                var block = cells.getOrNull(2)?.trim() ?: ""
-                var number = cells.getOrNull(3)?.trim() ?: ""
-                var title = cells.getOrNull(4)?.trim() ?: ""
-                var priceStr = cells.getOrNull(5)?.trim() ?: ""
-                var quantityStr = cells.getOrNull(6)?.trim() ?: ""
-                var remarks = cells.getOrNull(8)?.trim() ?: ""
-                var url = cells.getOrNull(11)?.trim() ?: ""
-                var columnType: String? = null
-                var order = 0
-
-                // 配置情報（エクスポートCSV形式）
-                if (cells.size >= 11) {
-                    val columnTypeStr = cells.getOrNull(9)?.trim() ?: ""
-                    if (columnTypeStr == "実行列") {
-                        columnType = "execute"
-                    } else if (columnTypeStr == "候補リスト") {
-                        columnType = "candidate"
-                    }
-                    order = cells.getOrNull(10)?.trim()?.toIntOrNull() ?: 0
-                }
-
-                // A〜D列が揃っていなければフォーマット2（M列〜）を試す
-                if (circle.isEmpty() || eventDate.isEmpty() || block.isEmpty() || number.isEmpty()) {
-                    circle = cells.getOrNull(12)?.trim() ?: ""
-                    eventDate = cells.getOrNull(13)?.trim() ?: ""
-                    block = cells.getOrNull(14)?.trim() ?: ""
-                    number = cells.getOrNull(15)?.trim() ?: ""
-                    title = cells.getOrNull(16)?.trim() ?: ""
-                    priceStr = cells.getOrNull(17)?.trim() ?: ""
-                    remarks = cells.getOrNull(22)?.trim() ?: ""
-                    url = cells.getOrNull(24)?.trim() ?: ""
-                    quantityStr = cells.getOrNull(26)?.trim() ?: ""
-
-                    // それでも必須項目が揃わなければスキップ
-                    if (circle.isEmpty() || eventDate.isEmpty() || block.isEmpty() || number.isEmpty()) {
-                        continue
-                    }
-                }
-
-                val price = parsePrice(priceStr)
-                val quantity = parseQuantity(quantityStr)
+                val fields = parseItemFields(cells) ?: continue
+                val (columnType, order) = parseColumnLayout(cells)
 
                 val item = ShoppingItem(
                     id = UUID.randomUUID().toString(),
                     eventId = eventId,
-                    circle = circle,
-                    eventDate = eventDate,
-                    block = block,
-                    number = number,
-                    title = title,
-                    price = price,
+                    circle = fields.circle,
+                    eventDate = fields.eventDate,
+                    block = fields.block,
+                    number = fields.number,
+                    title = fields.title,
+                    price = parsePrice(fields.priceStr),
                     purchaseStatus = PurchaseStatus.NONE,
-                    quantity = quantity,
-                    remarks = remarks,
-                    url = url.takeIf { it.isNotEmpty() },
+                    quantity = parseQuantity(fields.quantityStr),
+                    remarks = fields.remarks,
+                    url = fields.url.takeIf { it.isNotEmpty() },
                     priorityLevel = PriorityLevel.NONE,
                     protectionLevel = ProtectionLevel.NONE,
                     source = ItemSource.SPREADSHEET,
                     sortOrder = if (columnType != null && order > 0) order else sortOrderCounter,
-                    isInExecuteList = columnType == "execute"
+                    isInExecuteList = columnType == COLUMN_TYPE_EXECUTE_KEY
                 )
                 newItems.add(item)
                 sortOrderCounter++
@@ -229,7 +204,7 @@ object CsvParser {
                     layoutInfo.add(
                         LayoutInfo(
                             itemKey = getItemKey(item),
-                            eventDate = eventDate,
+                            eventDate = fields.eventDate,
                             columnType = columnType,
                             order = order
                         )
@@ -250,6 +225,73 @@ object CsvParser {
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private fun shouldSkipImportLine(line: String): Boolean {
+        if (line.isBlank()) return true
+        if (line.startsWith(METADATA_PREFIX)) return true
+        return line.contains("サークル名") && line.contains("参加日") && line.contains("ブロック")
+    }
+
+    private fun parseColumnLayout(cells: List<String>): Pair<String?, Int> {
+        val columnType = parseColumnType(cells.cell(9))
+        val order = cells.cell(10).toIntOrNull() ?: 0
+        return columnType to order
+    }
+
+    private fun parseColumnType(columnType: String): String? {
+        return when (columnType) {
+            COLUMN_TYPE_EXECUTE -> COLUMN_TYPE_EXECUTE_KEY
+            COLUMN_TYPE_CANDIDATE -> COLUMN_TYPE_CANDIDATE_KEY
+            else -> null
+        }
+    }
+
+    private fun parseItemFields(cells: List<String>): ItemFields? {
+        val primaryFields = extractPrimaryFormatFields(cells)
+        if (hasRequiredFields(primaryFields)) return primaryFields
+
+        val secondaryFields = extractSecondaryFormatFields(cells)
+        return secondaryFields.takeIf(::hasRequiredFields)
+    }
+
+    private fun extractPrimaryFormatFields(cells: List<String>): ItemFields {
+        return ItemFields(
+            circle = cells.cell(0),
+            eventDate = cells.cell(1),
+            block = cells.cell(2),
+            number = cells.cell(3),
+            title = cells.cell(4),
+            priceStr = cells.cell(5),
+            quantityStr = cells.cell(6),
+            remarks = cells.cell(8),
+            url = cells.cell(11)
+        )
+    }
+
+    private fun extractSecondaryFormatFields(cells: List<String>): ItemFields {
+        return ItemFields(
+            circle = cells.cell(12),
+            eventDate = cells.cell(13),
+            block = cells.cell(14),
+            number = cells.cell(15),
+            title = cells.cell(16),
+            priceStr = cells.cell(17),
+            quantityStr = cells.cell(26),
+            remarks = cells.cell(22),
+            url = cells.cell(24)
+        )
+    }
+
+    private fun hasRequiredFields(fields: ItemFields): Boolean {
+        return fields.circle.isNotEmpty() &&
+            fields.eventDate.isNotEmpty() &&
+            fields.block.isNotEmpty() &&
+            fields.number.isNotEmpty()
+    }
+
+    private fun List<String>.cell(index: Int): String {
+        return getOrNull(index)?.trim().orEmpty()
     }
 
     // =========================================================================
@@ -300,26 +342,21 @@ object CsvParser {
      * @param items 処理対象のアイテムリスト（mutable、直接変更される）
      */
     fun applyUrlTransfer(items: MutableList<ShoppingItem>) {
-        val dateGroups = items.groupBy { it.eventDate }
+        if (items.size < 2) return
 
-        dateGroups.forEach { (_, dateItems) ->
-            val circleGroups = dateItems.groupBy { it.circle }
+        val urlByGroup = items
+            .groupBy { UrlTransferGroupKey(it.eventDate, it.circle) }
+            .mapValues { (_, groupItems) ->
+                groupItems.firstOrNull { !it.url.isNullOrBlank() }?.url
+            }
 
-            circleGroups.forEach { (_, circleItems) ->
-                if (circleItems.size >= 2) {
-                    val itemWithUrl = circleItems.find { !it.url.isNullOrBlank() }
+        items.indices.forEach { index ->
+            val item = items[index]
+            if (!item.url.isNullOrBlank()) return@forEach
 
-                    if (itemWithUrl?.url != null) {
-                        circleItems.forEach { item ->
-                            if (item.url.isNullOrBlank()) {
-                                val index = items.indexOf(item)
-                                if (index >= 0) {
-                                    items[index] = item.copy(url = itemWithUrl.url)
-                                }
-                            }
-                        }
-                    }
-                }
+            val transferUrl = urlByGroup[UrlTransferGroupKey(item.eventDate, item.circle)]
+            if (!transferUrl.isNullOrBlank()) {
+                items[index] = item.copy(url = transferUrl)
             }
         }
     }
@@ -335,7 +372,7 @@ object CsvParser {
     fun parsePrice(priceStr: String): Int? {
         val trimmed = priceStr.trim()
         if (trimmed.isEmpty()) return null
-        return trimmed.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+        return trimmed.replace(nonDigitRegex, "").toIntOrNull() ?: 0
     }
 
     /**
@@ -345,7 +382,7 @@ object CsvParser {
     fun parseQuantity(quantityStr: String): Int {
         val trimmed = quantityStr.trim()
         if (trimmed.isEmpty()) return 1
-        val parsed = trimmed.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 1
+        val parsed = trimmed.replace(nonDigitRegex, "").toIntOrNull() ?: 1
         return parsed.coerceIn(1, 10)
     }
 
@@ -433,13 +470,12 @@ object CsvParser {
             val dateItems = itemsByDate[eventDate] ?: continue
             val executeIds = executeListItemIds[eventDate] ?: emptyList()
             val executeIdSet = executeIds.toSet()
+            val itemsById = dateItems.associateBy { it.id }
 
             // 実行列アイテム（順序付き）
-            val executeItems = executeIds.mapNotNull { id ->
-                dateItems.find { it.id == id }
-            }
+            val executeItems = executeIds.mapNotNull(itemsById::get)
             executeItems.forEachIndexed { index, item ->
-                result.add(Triple(item, "実行列", index + 1))
+                result.add(Triple(item, COLUMN_TYPE_EXECUTE, index + 1))
             }
 
             // 候補リストアイテム（sortOrder順）
@@ -447,7 +483,7 @@ object CsvParser {
                 .filter { !executeIdSet.contains(it.id) }
                 .sortedBy { it.sortOrder }
             candidateItems.forEachIndexed { index, item ->
-                result.add(Triple(item, "候補リスト", index + 1))
+                result.add(Triple(item, COLUMN_TYPE_CANDIDATE, index + 1))
             }
         }
 

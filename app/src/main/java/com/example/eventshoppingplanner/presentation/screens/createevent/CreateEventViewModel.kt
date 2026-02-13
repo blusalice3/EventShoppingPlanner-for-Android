@@ -167,28 +167,17 @@ class CreateEventViewModel @Inject constructor(
                             }
                         } else {
                             // 排他制御: CSV・テキストエリアをクリア
-                            _uiState.update {
-                                it.copy(
+                            _uiState.update { currentState ->
+                                currentState.copy(
                                     isUrlImporting = false,
                                     parsedItems = importResult.items,
                                     importSource = ImportSource.SPREADSHEET_URL,
                                     importedSpreadsheetUrl = url,
                                     importedSheetName = SHEET_NAME,
-                                    importedLayoutInfo = importResult.layoutInfo,
-                                    // CSV状態をクリア
-                                    selectedFileUri = null,
-                                    selectedFileName = null,
-                                    isParsed = false,
-                                    // テキストエリアをクリア
-                                    circles = "",
-                                    eventDates = "",
-                                    blocks = "",
-                                    numbers = "",
-                                    titles = "",
-                                    prices = "",
-                                    remarks = "",
-                                    urls = ""
+                                    importedLayoutInfo = importResult.layoutInfo
                                 )
+                                    .clearCsvSelection()
+                                    .clearTextAreaInputs()
                             }
                         }
                     },
@@ -282,26 +271,17 @@ class CreateEventViewModel @Inject constructor(
                             }
                         } else {
                             // 排他制御: スプレッドシートURL・テキストエリアをクリア
-                            _uiState.update {
-                                it.copy(
+                            _uiState.update { currentState ->
+                                currentState.copy(
                                     isLoading = false,
                                     parsedItems = importResult.items,
                                     importSource = ImportSource.CSV_FILE,
                                     isParsed = true,
                                     importedSpreadsheetUrl = importResult.spreadsheetUrl,
                                     importedLayoutInfo = importResult.layoutInfo,
-                                    // URLをクリア
-                                    spreadsheetUrl = "",
-                                    // テキストエリアをクリア
-                                    circles = "",
-                                    eventDates = "",
-                                    blocks = "",
-                                    numbers = "",
-                                    titles = "",
-                                    prices = "",
-                                    remarks = "",
-                                    urls = ""
+                                    spreadsheetUrl = ""
                                 )
+                                    .clearTextAreaInputs()
                             }
                         }
                     },
@@ -658,6 +638,27 @@ class CreateEventViewModel @Inject constructor(
     // =====================================================================
     // ユーティリティ
     // =====================================================================
+
+    private fun CreateEventUiState.clearCsvSelection(): CreateEventUiState {
+        return copy(
+            selectedFileUri = null,
+            selectedFileName = null,
+            isParsed = false
+        )
+    }
+
+    private fun CreateEventUiState.clearTextAreaInputs(): CreateEventUiState {
+        return copy(
+            circles = "",
+            eventDates = "",
+            blocks = "",
+            numbers = "",
+            titles = "",
+            prices = "",
+            remarks = "",
+            urls = ""
+        )
+    }
 
     fun clearError() {
         _uiState.update { it.copy(errorMessage = null) }
